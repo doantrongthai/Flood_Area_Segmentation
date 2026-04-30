@@ -3,6 +3,7 @@ from .dice import build_loss as build_dice
 from .bce_dice import build_loss as build_bce_dice
 from .focal import build_loss as build_focal
 from .tversky import build_loss as build_tversky
+from .hard_afm import build_loss as build_hard_afm
 import inspect
 
 def get_loss(loss_name, num_classes=1):
@@ -12,6 +13,7 @@ def get_loss(loss_name, num_classes=1):
         'bce_dice': build_bce_dice,
         'focal': build_focal,
         'tversky': build_tversky,
+        'hard_afm': build_hard_afm,
     }
 
     if loss_name not in all_losses:
