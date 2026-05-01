@@ -22,7 +22,8 @@ class Axial_PFCU_Single_NoPFCUSkip(nn.Module):
 
     def forward(self, x):
         b1 = self.branch_r1(x)
-        return self.act(self.pw_fuse(b1))
+        fused = self.pw_fuse(b1)
+        return self.act(fused)
 
 
 class EncoderBlock(nn.Module):
@@ -58,15 +59,11 @@ class SimpleBottleNeck(nn.Module):
         return self.act(self.dw(x))
 
 
-class DecoderBlock_NoUAFM(nn.Module):
+class DecoderBlock_NoPFCU(nn.Module):
     def __init__(self, in_c, out_c, mixer_kernel=(5, 5)):
         super().__init__()
-        gc = max(out_c // 4, 4)
         self.up        = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False)
         self.reduce_up = nn.Conv2d(in_c, out_c, 1, bias=False) if in_c != out_c else nn.Identity()
-        self.pw_down   = nn.Conv2d(out_c, gc,   kernel_size=1, bias=False)
-        self.pfcu      = Axial_PFCU_Single_NoPFCUSkip(gc, mixer_kernel=mixer_kernel)
-        self.pw_up     = nn.Conv2d(gc,   out_c, kernel_size=1, bias=False)
         self.act       = nn.PReLU(out_c)
 
     def forward(self, x, skip):
@@ -75,7 +72,7 @@ class DecoderBlock_NoUAFM(nn.Module):
         if x.shape[2:] != skip.shape[2:]:
             x = F.interpolate(x, size=skip.shape[2:], mode='bilinear', align_corners=False)
         x = x + skip
-        x = self.act(self.pw_up(self.pfcu(self.pw_down(x))) + x)
+        x = self.act(x)
         return x
 
 
@@ -89,10 +86,10 @@ class AblModel_NoBN(nn.Module):
         self.e3 = EncoderBlock(64,  128, mixer_kernel=mk)
         self.e4 = EncoderBlock(128, 256, mixer_kernel=mk)
         self.b4 = SimpleBottleNeck(256, max_dim=128)
-        self.d4 = DecoderBlock_NoUAFM(256, 128, mixer_kernel=mk)
-        self.d3 = DecoderBlock_NoUAFM(128, 64,  mixer_kernel=mk)
-        self.d2 = DecoderBlock_NoUAFM(64,  32,  mixer_kernel=mk)
-        self.d1 = DecoderBlock_NoUAFM(32,  16,  mixer_kernel=mk)
+        self.d4 = DecoderBlock_NoPFCU(256, 128, mixer_kernel=mk)
+        self.d3 = DecoderBlock_NoPFCU(128, 64,  mixer_kernel=mk)
+        self.d2 = DecoderBlock_NoPFCU(64,  32,  mixer_kernel=mk)
+        self.d1 = DecoderBlock_NoPFCU(32,  16,  mixer_kernel=mk)
         self.conv_out = nn.Conv2d(16, num_classes, kernel_size=1)
 
     def forward(self, x):
