@@ -63,7 +63,7 @@ class SimpleBottleNeck(nn.Module):
         return self.act(self.bn(self.dw(x)))
 
 
-class DecoderBlock_NoUAFM(nn.Module):
+class DecoderBlock_NoSkip(nn.Module):
     def __init__(self, in_c, out_c, mixer_kernel=(5, 5)):
         super().__init__()
         gc = max(out_c // 4, 4)
@@ -78,14 +78,11 @@ class DecoderBlock_NoUAFM(nn.Module):
     def forward(self, x, skip):
         x = self.up(x)
         x = self.reduce_up(x)
-        if x.shape[2:] != skip.shape[2:]:
-            x = F.interpolate(x, size=skip.shape[2:], mode='bilinear', align_corners=False)
-        x = x + skip
         x = self.act(self.bn(self.pw_up(self.pfcu(self.pw_down(x))) + x))
         return x
 
 
-class AblModel_NoPFCUSkip(nn.Module):
+class AblModel_NoSkip(nn.Module):
     def __init__(self, num_classes=1):
         super().__init__()
         mk = (5, 5)
@@ -95,10 +92,10 @@ class AblModel_NoPFCUSkip(nn.Module):
         self.e3 = EncoderBlock(64,  128, mixer_kernel=mk)
         self.e4 = EncoderBlock(128, 256, mixer_kernel=mk)
         self.b4 = SimpleBottleNeck(256, max_dim=128)
-        self.d4 = DecoderBlock_NoUAFM(256, 128, mixer_kernel=mk)
-        self.d3 = DecoderBlock_NoUAFM(128, 64,  mixer_kernel=mk)
-        self.d2 = DecoderBlock_NoUAFM(64,  32,  mixer_kernel=mk)
-        self.d1 = DecoderBlock_NoUAFM(32,  16,  mixer_kernel=mk)
+        self.d4 = DecoderBlock_NoSkip(256, 128, mixer_kernel=mk)
+        self.d3 = DecoderBlock_NoSkip(128, 64,  mixer_kernel=mk)
+        self.d2 = DecoderBlock_NoSkip(64,  32,  mixer_kernel=mk)
+        self.d1 = DecoderBlock_NoSkip(32,  16,  mixer_kernel=mk)
         self.conv_out = nn.Conv2d(16, num_classes, kernel_size=1)
 
     def forward(self, x):
@@ -116,4 +113,4 @@ class AblModel_NoPFCUSkip(nn.Module):
 
 
 def build_model(num_classes=1):
-    return AblModel_NoPFCUSkip(num_classes=num_classes)
+    return AblModel_NoSkip(num_classes=num_classes)

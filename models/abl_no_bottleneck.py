@@ -52,17 +52,6 @@ class EncoderBlock(nn.Module):
         return x, skip
 
 
-class SimpleBottleNeck(nn.Module):
-    def __init__(self, dim, max_dim=128):
-        super().__init__()
-        self.dw  = StandardDW(dim, mixer_kernel=(5, 5), dilation=1)
-        self.bn  = nn.BatchNorm2d(dim)
-        self.act = nn.PReLU(dim)
-
-    def forward(self, x):
-        return self.act(self.bn(self.dw(x)))
-
-
 class DecoderBlock_NoUAFM(nn.Module):
     def __init__(self, in_c, out_c, mixer_kernel=(5, 5)):
         super().__init__()
@@ -85,7 +74,7 @@ class DecoderBlock_NoUAFM(nn.Module):
         return x
 
 
-class AblModel_NoPFCUSkip(nn.Module):
+class AblModel_NoBottleneck(nn.Module):
     def __init__(self, num_classes=1):
         super().__init__()
         mk = (5, 5)
@@ -94,7 +83,6 @@ class AblModel_NoPFCUSkip(nn.Module):
         self.e2 = EncoderBlock(32,  64,  mixer_kernel=mk)
         self.e3 = EncoderBlock(64,  128, mixer_kernel=mk)
         self.e4 = EncoderBlock(128, 256, mixer_kernel=mk)
-        self.b4 = SimpleBottleNeck(256, max_dim=128)
         self.d4 = DecoderBlock_NoUAFM(256, 128, mixer_kernel=mk)
         self.d3 = DecoderBlock_NoUAFM(128, 64,  mixer_kernel=mk)
         self.d2 = DecoderBlock_NoUAFM(64,  32,  mixer_kernel=mk)
@@ -107,7 +95,6 @@ class AblModel_NoPFCUSkip(nn.Module):
         x, skip2 = self.e2(x)
         x, skip3 = self.e3(x)
         x, skip4 = self.e4(x)
-        x = self.b4(x)
         x = self.d4(x, skip4)
         x = self.d3(x, skip3)
         x = self.d2(x, skip2)
@@ -116,4 +103,4 @@ class AblModel_NoPFCUSkip(nn.Module):
 
 
 def build_model(num_classes=1):
-    return AblModel_NoPFCUSkip(num_classes=num_classes)
+    return AblModel_NoBottleneck(num_classes=num_classes)

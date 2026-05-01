@@ -18,13 +18,11 @@ class Axial_PFCU_Single_NoPFCUSkip(nn.Module):
         super().__init__()
         self.branch_r1 = StandardDW(dim, mixer_kernel, dilation=1)
         self.pw_fuse   = nn.Conv2d(dim, dim, kernel_size=1, bias=False)
-        self.bn_fuse   = nn.BatchNorm2d(dim)
         self.act       = nn.PReLU(dim)
 
     def forward(self, x):
         b1 = self.branch_r1(x)
-        fused = self.bn_fuse(self.pw_fuse(b1))
-        return self.act(fused)
+        return self.act(self.pw_fuse(b1))
 
 
 class EncoderBlock(nn.Module):
@@ -33,22 +31,20 @@ class EncoderBlock(nn.Module):
         self.same_channels = (in_c == out_c)
         conv_out = out_c - in_c if not self.same_channels else out_c
         self.pfcu      = Axial_PFCU_Single_NoPFCUSkip(in_c, mixer_kernel=mixer_kernel)
-        self.bn        = nn.BatchNorm2d(in_c)
         self.down_pool = nn.MaxPool2d((2, 2))
         if not self.same_channels:
             self.pw      = nn.Conv2d(in_c, conv_out, kernel_size=1, bias=False)
             self.down_pw = nn.MaxPool2d((2, 2))
-        self.bn2 = nn.BatchNorm2d(out_c)
         self.act = nn.PReLU(out_c)
 
     def forward(self, x):
-        skip = self.bn(self.pfcu(x))
+        skip = self.pfcu(x)
         pool = self.down_pool(skip)
         if self.same_channels:
-            x = self.act(self.bn2(pool))
+            x = self.act(pool)
         else:
             conv = self.down_pw(self.pw(skip))
-            x    = self.act(self.bn2(torch.cat([pool, conv], dim=1)))
+            x    = self.act(torch.cat([pool, conv], dim=1))
         return x, skip
 
 
@@ -56,11 +52,10 @@ class SimpleBottleNeck(nn.Module):
     def __init__(self, dim, max_dim=128):
         super().__init__()
         self.dw  = StandardDW(dim, mixer_kernel=(5, 5), dilation=1)
-        self.bn  = nn.BatchNorm2d(dim)
         self.act = nn.PReLU(dim)
 
     def forward(self, x):
-        return self.act(self.bn(self.dw(x)))
+        return self.act(self.dw(x))
 
 
 class DecoderBlock_NoUAFM(nn.Module):
@@ -72,7 +67,6 @@ class DecoderBlock_NoUAFM(nn.Module):
         self.pw_down   = nn.Conv2d(out_c, gc,   kernel_size=1, bias=False)
         self.pfcu      = Axial_PFCU_Single_NoPFCUSkip(gc, mixer_kernel=mixer_kernel)
         self.pw_up     = nn.Conv2d(gc,   out_c, kernel_size=1, bias=False)
-        self.bn        = nn.BatchNorm2d(out_c)
         self.act       = nn.PReLU(out_c)
 
     def forward(self, x, skip):
@@ -81,11 +75,11 @@ class DecoderBlock_NoUAFM(nn.Module):
         if x.shape[2:] != skip.shape[2:]:
             x = F.interpolate(x, size=skip.shape[2:], mode='bilinear', align_corners=False)
         x = x + skip
-        x = self.act(self.bn(self.pw_up(self.pfcu(self.pw_down(x))) + x))
+        x = self.act(self.pw_up(self.pfcu(self.pw_down(x))) + x)
         return x
 
 
-class AblModel_NoPFCUSkip(nn.Module):
+class AblModel_NoBN(nn.Module):
     def __init__(self, num_classes=1):
         super().__init__()
         mk = (5, 5)
@@ -116,4 +110,4 @@ class AblModel_NoPFCUSkip(nn.Module):
 
 
 def build_model(num_classes=1):
-    return AblModel_NoPFCUSkip(num_classes=num_classes)
+    return AblModel_NoBN(num_classes=num_classes)
