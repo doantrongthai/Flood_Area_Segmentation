@@ -1,72 +1,21 @@
-# Ablation A7: All PReLU activations replaced with ReLU — isolates contribution of learnable negative-slope activation for MCU-constrained feature learning
-
+# Ablation A7: Spatial attention in TinyUAFM removed → fixed equal weighting alpha=0.5 (no learned gating)
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 
-class CoordAtt(nn.Module):
-    def __init__(self, inp, oup, reduction=32):
-        super().__init__()
-        self.pool_h = nn.AdaptiveAvgPool2d((None, 1))
-        self.pool_w = nn.AdaptiveAvgPool2d((1, None))
-        mip = max(8, inp // reduction)
-        self.conv1  = nn.Conv2d(inp, mip, kernel_size=1, bias=False)
-        self.bn1    = nn.BatchNorm2d(mip)
-        self.act    = nn.ReLU(inplace=True)
-        self.conv_h = nn.Conv2d(mip, oup, kernel_size=1, bias=False)
-        self.conv_w = nn.Conv2d(mip, oup, kernel_size=1, bias=False)
-
-    def forward(self, x):
-        identity = x
-        n, c, h, w = x.size()
-        x_h = self.pool_h(x)
-        x_w = self.pool_w(x).permute(0, 1, 3, 2)
-        y   = torch.cat([x_h, x_w], dim=2)
-        y   = self.act(self.bn1(self.conv1(y)))
-        x_h, x_w = torch.split(y, [h, w], dim=2)
-        x_w = x_w.permute(0, 1, 3, 2)
-        a_h = self.conv_h(x_h).sigmoid()
-        a_w = self.conv_w(x_w).sigmoid()
-        return identity * a_w * a_h
-
-
-class ECAModule(nn.Module):
-    def __init__(self, channels, k_size=3):
-        super().__init__()
-        self.avg_pool = nn.AdaptiveAvgPool2d(1)
-        self.conv     = nn.Conv1d(1, 1, kernel_size=k_size, padding=(k_size - 1) // 2, bias=False)
-        self.sigmoid  = nn.Sigmoid()
-
-    def forward(self, x):
-        y = self.avg_pool(x)
-        y = self.conv(y.squeeze(-1).transpose(-1, -2)).transpose(-1, -2).unsqueeze(-1)
-        return x * self.sigmoid(y).expand_as(x)
-
-
-class TinyUAFM(nn.Module):
+class TinyUAFM_FixedWeight(nn.Module):
     def __init__(self, in_c, skip_c, out_c):
         super().__init__()
         self.reduce_up   = nn.Conv2d(in_c,   out_c, 1, bias=False) if in_c   != out_c else nn.Identity()
         self.reduce_skip = nn.Conv2d(skip_c, out_c, 1, bias=False) if skip_c != out_c else nn.Identity()
-        self.spatial_att = nn.Sequential(
-            nn.Conv2d(2, 1, kernel_size=3, padding=1, bias=False),
-            nn.Sigmoid()
-        )
-        self.eca = ECAModule(out_c)
 
     def forward(self, x_up, x_skip):
         x_up   = self.reduce_up(x_up)
         x_skip = self.reduce_skip(x_skip)
         if x_up.shape[2:] != x_skip.shape[2:]:
             x_up = F.interpolate(x_up, size=x_skip.shape[2:], mode='bilinear', align_corners=False)
-        spatial_input = torch.cat([
-            torch.mean(x_up,  dim=1, keepdim=True),
-            torch.max(x_skip, dim=1, keepdim=True)[0]
-        ], dim=1)
-        alpha = self.spatial_att(spatial_input)
-        out   = x_up * alpha + x_skip * (1 - alpha)
-        return self.eca(out)
+        return 0.5 * x_up + 0.5 * x_skip
 
 
 class AxialDW(nn.Module):
@@ -101,8 +50,7 @@ class Axial_PFCU_DG(nn.Module):
         self.pw_fuse     = nn.Conv2d(dim, dim, kernel_size=1, bias=False)
         self.bn_fuse     = nn.BatchNorm2d(dim)
         self.dg_shortcut = DetailGuidance(dim)
-        self.coord_att   = CoordAtt(dim, dim)
-        self.act         = nn.ReLU(inplace=True)
+        self.act         = nn.PReLU(dim)
 
     def forward(self, x):
         b1 = self.branch_r1(x)
@@ -110,8 +58,7 @@ class Axial_PFCU_DG(nn.Module):
         b5 = self.branch_r5(x)
         fused_context  = self.bn_fuse(self.pw_fuse(b1 + b2 + b5))
         guided_details = self.dg_shortcut(x)
-        out = self.act(fused_context + guided_details)
-        return self.coord_att(out)
+        return self.act(fused_context + guided_details)
 
 
 class EncoderBlock(nn.Module):
@@ -126,7 +73,7 @@ class EncoderBlock(nn.Module):
             self.pw      = nn.Conv2d(in_c, conv_out, kernel_size=1, bias=False)
             self.down_pw = nn.MaxPool2d((2, 2))
         self.bn2 = nn.BatchNorm2d(out_c)
-        self.act = nn.ReLU(inplace=True)
+        self.act = nn.PReLU(out_c)
 
     def forward(self, x):
         skip = self.bn(self.pfcu_dg(x))
@@ -143,17 +90,16 @@ class BottleNeckBlock(nn.Module):
     def __init__(self, dim, max_dim=128):
         super().__init__()
         hid = min(dim // 4, max_dim // 4)
-        self.pool1 = nn.Sequential(nn.AdaptiveAvgPool2d(1), nn.Conv2d(dim, hid, 1, bias=False), nn.BatchNorm2d(hid), nn.ReLU(inplace=True))
-        self.pool2 = nn.Sequential(nn.AdaptiveAvgPool2d(2), nn.Conv2d(dim, hid, 1, bias=False), nn.BatchNorm2d(hid), nn.ReLU(inplace=True))
-        self.pool4 = nn.Sequential(nn.AdaptiveAvgPool2d(4), nn.Conv2d(dim, hid, 1, bias=False), nn.BatchNorm2d(hid), nn.ReLU(inplace=True))
+        self.pool1 = nn.Sequential(nn.AdaptiveAvgPool2d(1), nn.Conv2d(dim, hid, 1, bias=False), nn.BatchNorm2d(hid), nn.PReLU(hid))
+        self.pool2 = nn.Sequential(nn.AdaptiveAvgPool2d(2), nn.Conv2d(dim, hid, 1, bias=False), nn.BatchNorm2d(hid), nn.PReLU(hid))
+        self.pool4 = nn.Sequential(nn.AdaptiveAvgPool2d(4), nn.Conv2d(dim, hid, 1, bias=False), nn.BatchNorm2d(hid), nn.PReLU(hid))
         self.spp_fuse = nn.Sequential(
             nn.Conv2d(dim + hid * 3, dim, kernel_size=1, bias=False),
             nn.BatchNorm2d(dim),
-            nn.ReLU(inplace=True)
+            nn.PReLU(dim)
         )
         self.axial_refine = AxialDW(dim, mixer_kernel=(5, 5), dilation=1)
         self.bn_refine    = nn.BatchNorm2d(dim)
-        self.coord_att    = CoordAtt(dim, dim)
 
     def forward(self, x):
         size = x.size()[2:]
@@ -162,7 +108,7 @@ class BottleNeckBlock(nn.Module):
         x4 = F.interpolate(self.pool4(x), size, mode='bilinear', align_corners=False)
         spp_fused = self.spp_fuse(torch.cat([x, x1, x2, x4], dim=1))
         out = self.bn_refine(self.axial_refine(spp_fused))
-        return self.coord_att(out + spp_fused)
+        return out + spp_fused
 
 
 class DecoderBlock(nn.Module):
@@ -170,12 +116,12 @@ class DecoderBlock(nn.Module):
         super().__init__()
         gc = max(out_c // 4, 4)
         self.up      = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False)
-        self.uafm    = TinyUAFM(in_c=in_c, skip_c=out_c, out_c=out_c)
+        self.uafm    = TinyUAFM_FixedWeight(in_c=in_c, skip_c=out_c, out_c=out_c)
         self.pw_down = nn.Conv2d(out_c, gc,   kernel_size=1, bias=False)
         self.pfcu_dg = Axial_PFCU_DG(gc, mixer_kernel=mixer_kernel)
         self.pw_up   = nn.Conv2d(gc,   out_c, kernel_size=1, bias=False)
         self.bn      = nn.BatchNorm2d(out_c)
-        self.act     = nn.ReLU(inplace=True)
+        self.act     = nn.PReLU(out_c)
 
     def forward(self, x, skip):
         x = self.up(x)
@@ -184,7 +130,7 @@ class DecoderBlock(nn.Module):
         return x
 
 
-class ULiteModel_PFCU_UAFM(nn.Module):
+class ULiteModel_A7(nn.Module):
     def __init__(self, num_classes=1):
         super().__init__()
         mk = (5, 5)
@@ -215,4 +161,4 @@ class ULiteModel_PFCU_UAFM(nn.Module):
 
 
 def build_model(num_classes=1):
-    return ULiteModel_PFCU_UAFM(num_classes=num_classes)
+    return ULiteModel_A7(num_classes=num_classes)

@@ -1,21 +1,7 @@
-# Ablation A1: CoordAtt removed (replaced with Identity) — isolates contribution of coordinate-aware spatial attention
-
+# Ablation A6: BottleNeckBlock removed entirely → identity pass-through, no bridge processing
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
-
-class ECAModule(nn.Module):
-    def __init__(self, channels, k_size=3):
-        super().__init__()
-        self.avg_pool = nn.AdaptiveAvgPool2d(1)
-        self.conv = nn.Conv1d(1, 1, kernel_size=k_size, padding=(k_size - 1) // 2, bias=False)
-        self.sigmoid = nn.Sigmoid()
-
-    def forward(self, x):
-        y = self.avg_pool(x)
-        y = self.conv(y.squeeze(-1).transpose(-1, -2)).transpose(-1, -2).unsqueeze(-1)
-        return x * self.sigmoid(y).expand_as(x)
 
 
 class TinyUAFM(nn.Module):
@@ -27,7 +13,6 @@ class TinyUAFM(nn.Module):
             nn.Conv2d(2, 1, kernel_size=3, padding=1, bias=False),
             nn.Sigmoid()
         )
-        self.eca = ECAModule(out_c)
 
     def forward(self, x_up, x_skip):
         x_up   = self.reduce_up(x_up)
@@ -35,12 +20,11 @@ class TinyUAFM(nn.Module):
         if x_up.shape[2:] != x_skip.shape[2:]:
             x_up = F.interpolate(x_up, size=x_skip.shape[2:], mode='bilinear', align_corners=False)
         spatial_input = torch.cat([
-            torch.mean(x_up,   dim=1, keepdim=True),
-            torch.max(x_skip,  dim=1, keepdim=True)[0]
+            torch.mean(x_up,  dim=1, keepdim=True),
+            torch.max(x_skip, dim=1, keepdim=True)[0]
         ], dim=1)
         alpha = self.spatial_att(spatial_input)
-        out = x_up * alpha + x_skip * (1 - alpha)
-        return self.eca(out)
+        return x_up * alpha + x_skip * (1 - alpha)
 
 
 class AxialDW(nn.Module):
@@ -59,7 +43,7 @@ class DetailGuidance(nn.Module):
         super().__init__()
         self.dg_dw_h = nn.Conv2d(dim, dim, kernel_size=(3, 1), padding='same', groups=dim, bias=False)
         self.dg_dw_w = nn.Conv2d(dim, dim, kernel_size=(1, 3), padding='same', groups=dim, bias=False)
-        self.bn = nn.BatchNorm2d(dim)
+        self.bn      = nn.BatchNorm2d(dim)
 
     def forward(self, x):
         edges = self.dg_dw_h(x) + self.dg_dw_w(x)
@@ -69,14 +53,13 @@ class DetailGuidance(nn.Module):
 class Axial_PFCU_DG(nn.Module):
     def __init__(self, dim, mixer_kernel=(5, 5)):
         super().__init__()
-        self.branch_r1  = AxialDW(dim, mixer_kernel, dilation=1)
-        self.branch_r2  = AxialDW(dim, mixer_kernel, dilation=2)
-        self.branch_r5  = AxialDW(dim, mixer_kernel, dilation=5)
-        self.pw_fuse    = nn.Conv2d(dim, dim, kernel_size=1, bias=False)
-        self.bn_fuse    = nn.BatchNorm2d(dim)
+        self.branch_r1   = AxialDW(dim, mixer_kernel, dilation=1)
+        self.branch_r2   = AxialDW(dim, mixer_kernel, dilation=2)
+        self.branch_r5   = AxialDW(dim, mixer_kernel, dilation=5)
+        self.pw_fuse     = nn.Conv2d(dim, dim, kernel_size=1, bias=False)
+        self.bn_fuse     = nn.BatchNorm2d(dim)
         self.dg_shortcut = DetailGuidance(dim)
-        self.coord_att  = nn.Identity()
-        self.act        = nn.PReLU(dim)
+        self.act         = nn.PReLU(dim)
 
     def forward(self, x):
         b1 = self.branch_r1(x)
@@ -84,8 +67,7 @@ class Axial_PFCU_DG(nn.Module):
         b5 = self.branch_r5(x)
         fused_context  = self.bn_fuse(self.pw_fuse(b1 + b2 + b5))
         guided_details = self.dg_shortcut(x)
-        out = self.act(fused_context + guided_details)
-        return self.coord_att(out)
+        return self.act(fused_context + guided_details)
 
 
 class EncoderBlock(nn.Module):
@@ -113,32 +95,6 @@ class EncoderBlock(nn.Module):
         return x, skip
 
 
-class BottleNeckBlock(nn.Module):
-    def __init__(self, dim, max_dim=128):
-        super().__init__()
-        hid = min(dim // 4, max_dim // 4)
-        self.pool1 = nn.Sequential(nn.AdaptiveAvgPool2d(1), nn.Conv2d(dim, hid, 1, bias=False), nn.BatchNorm2d(hid), nn.PReLU(hid))
-        self.pool2 = nn.Sequential(nn.AdaptiveAvgPool2d(2), nn.Conv2d(dim, hid, 1, bias=False), nn.BatchNorm2d(hid), nn.PReLU(hid))
-        self.pool4 = nn.Sequential(nn.AdaptiveAvgPool2d(4), nn.Conv2d(dim, hid, 1, bias=False), nn.BatchNorm2d(hid), nn.PReLU(hid))
-        self.spp_fuse = nn.Sequential(
-            nn.Conv2d(dim + hid * 3, dim, kernel_size=1, bias=False),
-            nn.BatchNorm2d(dim),
-            nn.PReLU(dim)
-        )
-        self.axial_refine = AxialDW(dim, mixer_kernel=(5, 5), dilation=1)
-        self.bn_refine    = nn.BatchNorm2d(dim)
-        self.coord_att    = nn.Identity()
-
-    def forward(self, x):
-        size = x.size()[2:]
-        x1 = F.interpolate(self.pool1(x), size, mode='bilinear', align_corners=False)
-        x2 = F.interpolate(self.pool2(x), size, mode='bilinear', align_corners=False)
-        x4 = F.interpolate(self.pool4(x), size, mode='bilinear', align_corners=False)
-        spp_fused = self.spp_fuse(torch.cat([x, x1, x2, x4], dim=1))
-        out = self.bn_refine(self.axial_refine(spp_fused))
-        return self.coord_att(out + spp_fused)
-
-
 class DecoderBlock(nn.Module):
     def __init__(self, in_c, out_c, mixer_kernel=(5, 5)):
         super().__init__()
@@ -158,7 +114,7 @@ class DecoderBlock(nn.Module):
         return x
 
 
-class ULiteModel_PFCU_UAFM(nn.Module):
+class ULiteModel_A6(nn.Module):
     def __init__(self, num_classes=1):
         super().__init__()
         mk = (5, 5)
@@ -167,7 +123,7 @@ class ULiteModel_PFCU_UAFM(nn.Module):
         self.e2 = EncoderBlock(32,  64,  mixer_kernel=mk)
         self.e3 = EncoderBlock(64,  128, mixer_kernel=mk)
         self.e4 = EncoderBlock(128, 256, mixer_kernel=mk)
-        self.b4 = BottleNeckBlock(256, max_dim=128)
+        self.b4 = nn.Identity()
         self.d4 = DecoderBlock(256, 128, mixer_kernel=mk)
         self.d3 = DecoderBlock(128, 64,  mixer_kernel=mk)
         self.d2 = DecoderBlock(64,  32,  mixer_kernel=mk)
@@ -189,4 +145,4 @@ class ULiteModel_PFCU_UAFM(nn.Module):
 
 
 def build_model(num_classes=1):
-    return ULiteModel_PFCU_UAFM(num_classes=num_classes)
+    return ULiteModel_A6(num_classes=num_classes)

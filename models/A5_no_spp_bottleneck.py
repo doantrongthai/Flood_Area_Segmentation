@@ -1,47 +1,7 @@
-# Ablation A6: SPP in BottleNeckBlock replaced with single AxialDW — isolates contribution of multi-scale pooling pyramid at bottleneck
-
+# Ablation A5: SPP removed from BottleNeckBlock → only AxialDW refinement retained, no pyramid pooling
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
-
-class CoordAtt(nn.Module):
-    def __init__(self, inp, oup, reduction=32):
-        super().__init__()
-        self.pool_h = nn.AdaptiveAvgPool2d((None, 1))
-        self.pool_w = nn.AdaptiveAvgPool2d((1, None))
-        mip = max(8, inp // reduction)
-        self.conv1  = nn.Conv2d(inp, mip, kernel_size=1, bias=False)
-        self.bn1    = nn.BatchNorm2d(mip)
-        self.act    = nn.PReLU(mip)
-        self.conv_h = nn.Conv2d(mip, oup, kernel_size=1, bias=False)
-        self.conv_w = nn.Conv2d(mip, oup, kernel_size=1, bias=False)
-
-    def forward(self, x):
-        identity = x
-        n, c, h, w = x.size()
-        x_h = self.pool_h(x)
-        x_w = self.pool_w(x).permute(0, 1, 3, 2)
-        y   = torch.cat([x_h, x_w], dim=2)
-        y   = self.act(self.bn1(self.conv1(y)))
-        x_h, x_w = torch.split(y, [h, w], dim=2)
-        x_w = x_w.permute(0, 1, 3, 2)
-        a_h = self.conv_h(x_h).sigmoid()
-        a_w = self.conv_w(x_w).sigmoid()
-        return identity * a_w * a_h
-
-
-class ECAModule(nn.Module):
-    def __init__(self, channels, k_size=3):
-        super().__init__()
-        self.avg_pool = nn.AdaptiveAvgPool2d(1)
-        self.conv     = nn.Conv1d(1, 1, kernel_size=k_size, padding=(k_size - 1) // 2, bias=False)
-        self.sigmoid  = nn.Sigmoid()
-
-    def forward(self, x):
-        y = self.avg_pool(x)
-        y = self.conv(y.squeeze(-1).transpose(-1, -2)).transpose(-1, -2).unsqueeze(-1)
-        return x * self.sigmoid(y).expand_as(x)
 
 
 class TinyUAFM(nn.Module):
@@ -53,7 +13,6 @@ class TinyUAFM(nn.Module):
             nn.Conv2d(2, 1, kernel_size=3, padding=1, bias=False),
             nn.Sigmoid()
         )
-        self.eca = ECAModule(out_c)
 
     def forward(self, x_up, x_skip):
         x_up   = self.reduce_up(x_up)
@@ -65,8 +24,7 @@ class TinyUAFM(nn.Module):
             torch.max(x_skip, dim=1, keepdim=True)[0]
         ], dim=1)
         alpha = self.spatial_att(spatial_input)
-        out   = x_up * alpha + x_skip * (1 - alpha)
-        return self.eca(out)
+        return x_up * alpha + x_skip * (1 - alpha)
 
 
 class AxialDW(nn.Module):
@@ -101,7 +59,6 @@ class Axial_PFCU_DG(nn.Module):
         self.pw_fuse     = nn.Conv2d(dim, dim, kernel_size=1, bias=False)
         self.bn_fuse     = nn.BatchNorm2d(dim)
         self.dg_shortcut = DetailGuidance(dim)
-        self.coord_att   = CoordAtt(dim, dim)
         self.act         = nn.PReLU(dim)
 
     def forward(self, x):
@@ -110,8 +67,7 @@ class Axial_PFCU_DG(nn.Module):
         b5 = self.branch_r5(x)
         fused_context  = self.bn_fuse(self.pw_fuse(b1 + b2 + b5))
         guided_details = self.dg_shortcut(x)
-        out = self.act(fused_context + guided_details)
-        return self.coord_att(out)
+        return self.act(fused_context + guided_details)
 
 
 class EncoderBlock(nn.Module):
@@ -139,17 +95,15 @@ class EncoderBlock(nn.Module):
         return x, skip
 
 
-class BottleNeckBlock(nn.Module):
+class BottleNeckBlock_NoSPP(nn.Module):
     def __init__(self, dim, max_dim=128):
         super().__init__()
         self.axial_refine = AxialDW(dim, mixer_kernel=(5, 5), dilation=1)
         self.bn_refine    = nn.BatchNorm2d(dim)
-        self.act          = nn.PReLU(dim)
-        self.coord_att    = CoordAtt(dim, dim)
 
     def forward(self, x):
-        out = self.act(self.bn_refine(self.axial_refine(x)))
-        return self.coord_att(out + x)
+        out = self.bn_refine(self.axial_refine(x))
+        return out + x
 
 
 class DecoderBlock(nn.Module):
@@ -171,7 +125,7 @@ class DecoderBlock(nn.Module):
         return x
 
 
-class ULiteModel_PFCU_UAFM(nn.Module):
+class ULiteModel_A5(nn.Module):
     def __init__(self, num_classes=1):
         super().__init__()
         mk = (5, 5)
@@ -180,7 +134,7 @@ class ULiteModel_PFCU_UAFM(nn.Module):
         self.e2 = EncoderBlock(32,  64,  mixer_kernel=mk)
         self.e3 = EncoderBlock(64,  128, mixer_kernel=mk)
         self.e4 = EncoderBlock(128, 256, mixer_kernel=mk)
-        self.b4 = BottleNeckBlock(256, max_dim=128)
+        self.b4 = BottleNeckBlock_NoSPP(256, max_dim=128)
         self.d4 = DecoderBlock(256, 128, mixer_kernel=mk)
         self.d3 = DecoderBlock(128, 64,  mixer_kernel=mk)
         self.d2 = DecoderBlock(64,  32,  mixer_kernel=mk)
@@ -202,4 +156,4 @@ class ULiteModel_PFCU_UAFM(nn.Module):
 
 
 def build_model(num_classes=1):
-    return ULiteModel_PFCU_UAFM(num_classes=num_classes)
+    return ULiteModel_A5(num_classes=num_classes)
