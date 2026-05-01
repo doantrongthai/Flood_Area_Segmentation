@@ -13,36 +13,22 @@ class StandardDW(nn.Module):
         return x + self.dw(x)
 
 
-class DetailGuidance(nn.Module):
-    def __init__(self, dim):
-        super().__init__()
-        self.dg_dw_h = nn.Conv2d(dim, dim, kernel_size=(3, 1), padding='same', groups=dim, bias=False)
-        self.dg_dw_w = nn.Conv2d(dim, dim, kernel_size=(1, 3), padding='same', groups=dim, bias=False)
-        self.bn      = nn.BatchNorm2d(dim)
-
-    def forward(self, x):
-        edges = self.dg_dw_h(x) + self.dg_dw_w(x)
-        return self.bn(x + edges)
-
-
-class Axial_PFCU_DG(nn.Module):
+class Axial_PFCU(nn.Module):
     def __init__(self, dim, mixer_kernel=(5, 5)):
         super().__init__()
-        self.branch_r1   = StandardDW(dim, mixer_kernel, dilation=1)
-        self.branch_r2   = StandardDW(dim, mixer_kernel, dilation=2)
-        self.branch_r5   = StandardDW(dim, mixer_kernel, dilation=5)
-        self.pw_fuse     = nn.Conv2d(dim, dim, kernel_size=1, bias=False)
-        self.bn_fuse     = nn.BatchNorm2d(dim)
-        self.dg_shortcut = DetailGuidance(dim)
-        self.act         = nn.PReLU(dim)
+        self.branch_r1 = StandardDW(dim, mixer_kernel, dilation=1)
+        self.branch_r2 = StandardDW(dim, mixer_kernel, dilation=2)
+        self.branch_r5 = StandardDW(dim, mixer_kernel, dilation=5)
+        self.pw_fuse   = nn.Conv2d(dim, dim, kernel_size=1, bias=False)
+        self.bn_fuse   = nn.BatchNorm2d(dim)
+        self.act       = nn.PReLU(dim)
 
     def forward(self, x):
         b1 = self.branch_r1(x)
         b2 = self.branch_r2(x)
         b5 = self.branch_r5(x)
-        fused_context  = self.bn_fuse(self.pw_fuse(b1 + b2 + b5))
-        guided_details = self.dg_shortcut(x)
-        return self.act(fused_context + guided_details)
+        fused = self.bn_fuse(self.pw_fuse(b1 + b2 + b5))
+        return self.act(fused + x)
 
 
 class EncoderBlock(nn.Module):
@@ -50,7 +36,7 @@ class EncoderBlock(nn.Module):
         super().__init__()
         self.same_channels = (in_c == out_c)
         conv_out = out_c - in_c if not self.same_channels else out_c
-        self.pfcu_dg   = Axial_PFCU_DG(in_c, mixer_kernel=mixer_kernel)
+        self.pfcu      = Axial_PFCU(in_c, mixer_kernel=mixer_kernel)
         self.bn        = nn.BatchNorm2d(in_c)
         self.down_pool = nn.MaxPool2d((2, 2))
         if not self.same_channels:
@@ -60,7 +46,7 @@ class EncoderBlock(nn.Module):
         self.act = nn.PReLU(out_c)
 
     def forward(self, x):
-        skip = self.bn(self.pfcu_dg(x))
+        skip = self.bn(self.pfcu(x))
         pool = self.down_pool(skip)
         if self.same_channels:
             x = self.act(self.bn2(pool))
@@ -99,13 +85,13 @@ class DecoderBlock_NoUAFM(nn.Module):
     def __init__(self, in_c, out_c, mixer_kernel=(5, 5)):
         super().__init__()
         gc = max(out_c // 4, 4)
-        self.up         = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False)
-        self.reduce_up  = nn.Conv2d(in_c, out_c, 1, bias=False) if in_c != out_c else nn.Identity()
-        self.pw_down    = nn.Conv2d(out_c, gc,   kernel_size=1, bias=False)
-        self.pfcu_dg    = Axial_PFCU_DG(gc, mixer_kernel=mixer_kernel)
-        self.pw_up      = nn.Conv2d(gc,   out_c, kernel_size=1, bias=False)
-        self.bn         = nn.BatchNorm2d(out_c)
-        self.act        = nn.PReLU(out_c)
+        self.up        = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False)
+        self.reduce_up = nn.Conv2d(in_c, out_c, 1, bias=False) if in_c != out_c else nn.Identity()
+        self.pw_down   = nn.Conv2d(out_c, gc,   kernel_size=1, bias=False)
+        self.pfcu      = Axial_PFCU(gc, mixer_kernel=mixer_kernel)
+        self.pw_up     = nn.Conv2d(gc,   out_c, kernel_size=1, bias=False)
+        self.bn        = nn.BatchNorm2d(out_c)
+        self.act       = nn.PReLU(out_c)
 
     def forward(self, x, skip):
         x = self.up(x)
@@ -113,11 +99,11 @@ class DecoderBlock_NoUAFM(nn.Module):
         if x.shape[2:] != skip.shape[2:]:
             x = F.interpolate(x, size=skip.shape[2:], mode='bilinear', align_corners=False)
         x = x + skip
-        x = self.act(self.bn(self.pw_up(self.pfcu_dg(self.pw_down(x))) + x))
+        x = self.act(self.bn(self.pw_up(self.pfcu(self.pw_down(x))) + x))
         return x
 
 
-class ULiteModel_NoUAFM(nn.Module):
+class ULiteModel_NoUAFM_NoDG(nn.Module):
     def __init__(self, num_classes=1):
         super().__init__()
         mk = (5, 5)
@@ -148,4 +134,4 @@ class ULiteModel_NoUAFM(nn.Module):
 
 
 def build_model(num_classes=1):
-    return ULiteModel_NoUAFM(num_classes=num_classes)
+    return ULiteModel_NoUAFM_NoDG(num_classes=num_classes)
