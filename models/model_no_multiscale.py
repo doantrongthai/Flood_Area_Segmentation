@@ -1,4 +1,3 @@
-# Ablation A6: BottleNeckBlock removed entirely → identity pass-through, no bridge processing
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -27,15 +26,14 @@ class TinyUAFM(nn.Module):
         return x_up * alpha + x_skip * (1 - alpha)
 
 
-class AxialDW(nn.Module):
+class StandardDW(nn.Module):
     def __init__(self, dim, mixer_kernel, dilation=1):
         super().__init__()
-        h, w = mixer_kernel
-        self.dw_h = nn.Conv2d(dim, dim, kernel_size=(h, 1), padding='same', groups=dim, dilation=dilation, bias=False)
-        self.dw_w = nn.Conv2d(dim, dim, kernel_size=(1, w), padding='same', groups=dim, dilation=dilation, bias=False)
+        k = mixer_kernel[0]
+        self.dw = nn.Conv2d(dim, dim, kernel_size=k, padding='same', groups=dim, dilation=dilation, bias=False)
 
     def forward(self, x):
-        return x + self.dw_h(x) + self.dw_w(x)
+        return x + self.dw(x)
 
 
 class DetailGuidance(nn.Module):
@@ -50,12 +48,10 @@ class DetailGuidance(nn.Module):
         return self.bn(x + edges)
 
 
-class Axial_PFCU_DG(nn.Module):
+class Axial_PFCU_DG_Single(nn.Module):
     def __init__(self, dim, mixer_kernel=(5, 5)):
         super().__init__()
-        self.branch_r1   = AxialDW(dim, mixer_kernel, dilation=1)
-        self.branch_r2   = AxialDW(dim, mixer_kernel, dilation=2)
-        self.branch_r5   = AxialDW(dim, mixer_kernel, dilation=5)
+        self.branch_r1   = StandardDW(dim, mixer_kernel, dilation=1)
         self.pw_fuse     = nn.Conv2d(dim, dim, kernel_size=1, bias=False)
         self.bn_fuse     = nn.BatchNorm2d(dim)
         self.dg_shortcut = DetailGuidance(dim)
@@ -63,9 +59,7 @@ class Axial_PFCU_DG(nn.Module):
 
     def forward(self, x):
         b1 = self.branch_r1(x)
-        b2 = self.branch_r2(x)
-        b5 = self.branch_r5(x)
-        fused_context  = self.bn_fuse(self.pw_fuse(b1 + b2 + b5))
+        fused_context  = self.bn_fuse(self.pw_fuse(b1))
         guided_details = self.dg_shortcut(x)
         return self.act(fused_context + guided_details)
 
@@ -75,7 +69,7 @@ class EncoderBlock(nn.Module):
         super().__init__()
         self.same_channels = (in_c == out_c)
         conv_out = out_c - in_c if not self.same_channels else out_c
-        self.pfcu_dg   = Axial_PFCU_DG(in_c, mixer_kernel=mixer_kernel)
+        self.pfcu_dg   = Axial_PFCU_DG_Single(in_c, mixer_kernel=mixer_kernel)
         self.bn        = nn.BatchNorm2d(in_c)
         self.down_pool = nn.MaxPool2d((2, 2))
         if not self.same_channels:
@@ -95,6 +89,31 @@ class EncoderBlock(nn.Module):
         return x, skip
 
 
+class BottleNeckBlock(nn.Module):
+    def __init__(self, dim, max_dim=128):
+        super().__init__()
+        hid = min(dim // 4, max_dim // 4)
+        self.pool1 = nn.Sequential(nn.AdaptiveAvgPool2d(1), nn.Conv2d(dim, hid, 1, bias=False), nn.BatchNorm2d(hid), nn.PReLU(hid))
+        self.pool2 = nn.Sequential(nn.AdaptiveAvgPool2d(2), nn.Conv2d(dim, hid, 1, bias=False), nn.BatchNorm2d(hid), nn.PReLU(hid))
+        self.pool4 = nn.Sequential(nn.AdaptiveAvgPool2d(4), nn.Conv2d(dim, hid, 1, bias=False), nn.BatchNorm2d(hid), nn.PReLU(hid))
+        self.spp_fuse = nn.Sequential(
+            nn.Conv2d(dim + hid * 3, dim, kernel_size=1, bias=False),
+            nn.BatchNorm2d(dim),
+            nn.PReLU(dim)
+        )
+        self.axial_refine = StandardDW(dim, mixer_kernel=(5, 5), dilation=1)
+        self.bn_refine    = nn.BatchNorm2d(dim)
+
+    def forward(self, x):
+        size = x.size()[2:]
+        x1 = F.interpolate(self.pool1(x), size, mode='bilinear', align_corners=False)
+        x2 = F.interpolate(self.pool2(x), size, mode='bilinear', align_corners=False)
+        x4 = F.interpolate(self.pool4(x), size, mode='bilinear', align_corners=False)
+        spp_fused = self.spp_fuse(torch.cat([x, x1, x2, x4], dim=1))
+        out = self.bn_refine(self.axial_refine(spp_fused))
+        return out + spp_fused
+
+
 class DecoderBlock(nn.Module):
     def __init__(self, in_c, out_c, mixer_kernel=(5, 5)):
         super().__init__()
@@ -102,7 +121,7 @@ class DecoderBlock(nn.Module):
         self.up      = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False)
         self.uafm    = TinyUAFM(in_c=in_c, skip_c=out_c, out_c=out_c)
         self.pw_down = nn.Conv2d(out_c, gc,   kernel_size=1, bias=False)
-        self.pfcu_dg = Axial_PFCU_DG(gc, mixer_kernel=mixer_kernel)
+        self.pfcu_dg = Axial_PFCU_DG_Single(gc, mixer_kernel=mixer_kernel)
         self.pw_up   = nn.Conv2d(gc,   out_c, kernel_size=1, bias=False)
         self.bn      = nn.BatchNorm2d(out_c)
         self.act     = nn.PReLU(out_c)
@@ -114,7 +133,7 @@ class DecoderBlock(nn.Module):
         return x
 
 
-class ULiteModel_A6(nn.Module):
+class ULiteModel_NoMultiScale(nn.Module):
     def __init__(self, num_classes=1):
         super().__init__()
         mk = (5, 5)
@@ -123,7 +142,7 @@ class ULiteModel_A6(nn.Module):
         self.e2 = EncoderBlock(32,  64,  mixer_kernel=mk)
         self.e3 = EncoderBlock(64,  128, mixer_kernel=mk)
         self.e4 = EncoderBlock(128, 256, mixer_kernel=mk)
-        self.b4 = nn.Identity()
+        self.b4 = BottleNeckBlock(256, max_dim=128)
         self.d4 = DecoderBlock(256, 128, mixer_kernel=mk)
         self.d3 = DecoderBlock(128, 64,  mixer_kernel=mk)
         self.d2 = DecoderBlock(64,  32,  mixer_kernel=mk)
@@ -145,4 +164,4 @@ class ULiteModel_A6(nn.Module):
 
 
 def build_model(num_classes=1):
-    return ULiteModel_A6(num_classes=num_classes)
+    return ULiteModel_NoMultiScale(num_classes=num_classes)

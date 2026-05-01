@@ -1,4 +1,4 @@
-
+# Ablation A4: AxialDW replaced with standard square-kernel depthwise conv (no H/W axis decomposition)
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -27,15 +27,14 @@ class TinyUAFM(nn.Module):
         return x_up * alpha + x_skip * (1 - alpha)
 
 
-class AxialDW(nn.Module):
+class StandardDW(nn.Module):
     def __init__(self, dim, mixer_kernel, dilation=1):
         super().__init__()
-        h, w = mixer_kernel
-        self.dw_h = nn.Conv2d(dim, dim, kernel_size=(h, 1), padding='same', groups=dim, dilation=dilation, bias=False)
-        self.dw_w = nn.Conv2d(dim, dim, kernel_size=(1, w), padding='same', groups=dim, dilation=dilation, bias=False)
+        k = mixer_kernel[0]
+        self.dw = nn.Conv2d(dim, dim, kernel_size=k, padding='same', groups=dim, dilation=dilation, bias=False)
 
     def forward(self, x):
-        return x + self.dw_h(x) + self.dw_w(x)
+        return x + self.dw(x)
 
 
 class DetailGuidance(nn.Module):
@@ -53,9 +52,9 @@ class DetailGuidance(nn.Module):
 class Axial_PFCU_DG(nn.Module):
     def __init__(self, dim, mixer_kernel=(5, 5)):
         super().__init__()
-        self.branch_r1   = AxialDW(dim, mixer_kernel, dilation=1)
-        self.branch_r2   = AxialDW(dim, mixer_kernel, dilation=2)
-        self.branch_r5   = AxialDW(dim, mixer_kernel, dilation=5)
+        self.branch_r1   = StandardDW(dim, mixer_kernel, dilation=1)
+        self.branch_r2   = StandardDW(dim, mixer_kernel, dilation=2)
+        self.branch_r5   = StandardDW(dim, mixer_kernel, dilation=5)
         self.pw_fuse     = nn.Conv2d(dim, dim, kernel_size=1, bias=False)
         self.bn_fuse     = nn.BatchNorm2d(dim)
         self.dg_shortcut = DetailGuidance(dim)
@@ -107,7 +106,7 @@ class BottleNeckBlock(nn.Module):
             nn.BatchNorm2d(dim),
             nn.PReLU(dim)
         )
-        self.axial_refine = AxialDW(dim, mixer_kernel=(5, 5), dilation=1)
+        self.axial_refine = StandardDW(dim, mixer_kernel=(5, 5), dilation=1)
         self.bn_refine    = nn.BatchNorm2d(dim)
 
     def forward(self, x):
@@ -139,7 +138,7 @@ class DecoderBlock(nn.Module):
         return x
 
 
-class ULiteModel_PFCU_UAFM(nn.Module):
+class ULiteModel_A4(nn.Module):
     def __init__(self, num_classes=1):
         super().__init__()
         mk = (5, 5)
@@ -170,4 +169,4 @@ class ULiteModel_PFCU_UAFM(nn.Module):
 
 
 def build_model(num_classes=1):
-    return ULiteModel_PFCU_UAFM(num_classes=num_classes)
+    return ULiteModel_A4(num_classes=num_classes)
