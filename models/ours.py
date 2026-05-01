@@ -1,30 +1,6 @@
-# Ablation A4: AxialDW replaced with standard square-kernel depthwise conv (no H/W axis decomposition)
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
-
-class TinyUAFM(nn.Module):
-    def __init__(self, in_c, skip_c, out_c):
-        super().__init__()
-        self.reduce_up   = nn.Conv2d(in_c,   out_c, 1, bias=False) if in_c   != out_c else nn.Identity()
-        self.reduce_skip = nn.Conv2d(skip_c, out_c, 1, bias=False) if skip_c != out_c else nn.Identity()
-        self.spatial_att = nn.Sequential(
-            nn.Conv2d(2, 1, kernel_size=3, padding=1, bias=False),
-            nn.Sigmoid()
-        )
-
-    def forward(self, x_up, x_skip):
-        x_up   = self.reduce_up(x_up)
-        x_skip = self.reduce_skip(x_skip)
-        if x_up.shape[2:] != x_skip.shape[2:]:
-            x_up = F.interpolate(x_up, size=x_skip.shape[2:], mode='bilinear', align_corners=False)
-        spatial_input = torch.cat([
-            torch.mean(x_up,  dim=1, keepdim=True),
-            torch.max(x_skip, dim=1, keepdim=True)[0]
-        ], dim=1)
-        alpha = self.spatial_att(spatial_input)
-        return x_up * alpha + x_skip * (1 - alpha)
 
 
 class StandardDW(nn.Module):
@@ -119,26 +95,29 @@ class BottleNeckBlock(nn.Module):
         return out + spp_fused
 
 
-class DecoderBlock(nn.Module):
+class DecoderBlock_NoUAFM(nn.Module):
     def __init__(self, in_c, out_c, mixer_kernel=(5, 5)):
         super().__init__()
         gc = max(out_c // 4, 4)
-        self.up      = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False)
-        self.uafm    = TinyUAFM(in_c=in_c, skip_c=out_c, out_c=out_c)
-        self.pw_down = nn.Conv2d(out_c, gc,   kernel_size=1, bias=False)
-        self.pfcu_dg = Axial_PFCU_DG(gc, mixer_kernel=mixer_kernel)
-        self.pw_up   = nn.Conv2d(gc,   out_c, kernel_size=1, bias=False)
-        self.bn      = nn.BatchNorm2d(out_c)
-        self.act     = nn.PReLU(out_c)
+        self.up         = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False)
+        self.reduce_up  = nn.Conv2d(in_c, out_c, 1, bias=False) if in_c != out_c else nn.Identity()
+        self.pw_down    = nn.Conv2d(out_c, gc,   kernel_size=1, bias=False)
+        self.pfcu_dg    = Axial_PFCU_DG(gc, mixer_kernel=mixer_kernel)
+        self.pw_up      = nn.Conv2d(gc,   out_c, kernel_size=1, bias=False)
+        self.bn         = nn.BatchNorm2d(out_c)
+        self.act        = nn.PReLU(out_c)
 
     def forward(self, x, skip):
         x = self.up(x)
-        x = self.uafm(x, skip)
+        x = self.reduce_up(x)
+        if x.shape[2:] != skip.shape[2:]:
+            x = F.interpolate(x, size=skip.shape[2:], mode='bilinear', align_corners=False)
+        x = x + skip
         x = self.act(self.bn(self.pw_up(self.pfcu_dg(self.pw_down(x))) + x))
         return x
 
 
-class ULiteModel_A4(nn.Module):
+class ULiteModel_NoUAFM(nn.Module):
     def __init__(self, num_classes=1):
         super().__init__()
         mk = (5, 5)
@@ -148,10 +127,10 @@ class ULiteModel_A4(nn.Module):
         self.e3 = EncoderBlock(64,  128, mixer_kernel=mk)
         self.e4 = EncoderBlock(128, 256, mixer_kernel=mk)
         self.b4 = BottleNeckBlock(256, max_dim=128)
-        self.d4 = DecoderBlock(256, 128, mixer_kernel=mk)
-        self.d3 = DecoderBlock(128, 64,  mixer_kernel=mk)
-        self.d2 = DecoderBlock(64,  32,  mixer_kernel=mk)
-        self.d1 = DecoderBlock(32,  16,  mixer_kernel=mk)
+        self.d4 = DecoderBlock_NoUAFM(256, 128, mixer_kernel=mk)
+        self.d3 = DecoderBlock_NoUAFM(128, 64,  mixer_kernel=mk)
+        self.d2 = DecoderBlock_NoUAFM(64,  32,  mixer_kernel=mk)
+        self.d1 = DecoderBlock_NoUAFM(32,  16,  mixer_kernel=mk)
         self.conv_out = nn.Conv2d(16, num_classes, kernel_size=1)
 
     def forward(self, x):
@@ -169,4 +148,4 @@ class ULiteModel_A4(nn.Module):
 
 
 def build_model(num_classes=1):
-    return ULiteModel_A4(num_classes=num_classes)
+    return ULiteModel_NoUAFM(num_classes=num_classes)
