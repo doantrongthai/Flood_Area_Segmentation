@@ -13,31 +13,18 @@ class StandardDW(nn.Module):
         return x + self.dw(x)
 
 
-class Axial_PFCU_MultiDilation(nn.Module):
+class Axial_PFCU_Single_NoPFCUSkip(nn.Module):
     def __init__(self, dim, mixer_kernel=(5, 5)):
         super().__init__()
-        assert dim % 3 == 0 or True
-        split = dim // 3
-        remainder = dim - split * 2
-        self.split1 = split
-        self.split2 = split
-        self.split3 = remainder
-        self.branch_d1 = nn.Conv2d(split,     split,     kernel_size=mixer_kernel[0], padding='same', groups=split,     dilation=1, bias=False)
-        self.branch_d2 = nn.Conv2d(split,     split,     kernel_size=mixer_kernel[0], padding='same', groups=split,     dilation=2, bias=False)
-        self.branch_d4 = nn.Conv2d(remainder, remainder, kernel_size=mixer_kernel[0], padding='same', groups=remainder, dilation=4, bias=False)
+        self.branch_r1 = StandardDW(dim, mixer_kernel, dilation=1)
         self.pw_fuse   = nn.Conv2d(dim, dim, kernel_size=1, bias=False)
         self.bn_fuse   = nn.BatchNorm2d(dim)
-        self.act       = nn.PReLU(dim)
+        self.act       = nn.SiLU(inplace=True)
 
     def forward(self, x):
-        x1 = x[:, :self.split1]
-        x2 = x[:, self.split1:self.split1 + self.split2]
-        x3 = x[:, self.split1 + self.split2:]
-        b1 = x1 + self.branch_d1(x1)
-        b2 = x2 + self.branch_d2(x2)
-        b3 = x3 + self.branch_d4(x3)
-        cat = torch.cat([b1, b2, b3], dim=1)
-        return self.act(self.bn_fuse(self.pw_fuse(cat)))
+        b1    = self.branch_r1(x)
+        fused = self.bn_fuse(self.pw_fuse(b1))
+        return self.act(fused)
 
 
 class EncoderBlock(nn.Module):
@@ -45,14 +32,14 @@ class EncoderBlock(nn.Module):
         super().__init__()
         self.same_channels = (in_c == out_c)
         conv_out = out_c - in_c if not self.same_channels else out_c
-        self.pfcu      = Axial_PFCU_MultiDilation(in_c, mixer_kernel=mixer_kernel)
+        self.pfcu      = Axial_PFCU_Single_NoPFCUSkip(in_c, mixer_kernel=mixer_kernel)
         self.bn        = nn.BatchNorm2d(in_c)
         self.down_pool = nn.MaxPool2d((2, 2))
         if not self.same_channels:
             self.pw      = nn.Conv2d(in_c, conv_out, kernel_size=1, bias=False)
             self.down_pw = nn.MaxPool2d((2, 2))
         self.bn2 = nn.BatchNorm2d(out_c)
-        self.act = nn.PReLU(out_c)
+        self.act = nn.SiLU(inplace=True)
 
     def forward(self, x):
         skip = self.bn(self.pfcu(x))
@@ -70,7 +57,7 @@ class SimpleBottleNeck(nn.Module):
         super().__init__()
         self.dw  = StandardDW(dim, mixer_kernel=(5, 5), dilation=1)
         self.bn  = nn.BatchNorm2d(dim)
-        self.act = nn.PReLU(dim)
+        self.act = nn.SiLU(inplace=True)
 
     def forward(self, x):
         return self.act(self.bn(self.dw(x)))
@@ -82,7 +69,7 @@ class DecoderBlock_NoPFCU(nn.Module):
         self.up        = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False)
         self.reduce_up = nn.Conv2d(in_c, out_c, 1, bias=False) if in_c != out_c else nn.Identity()
         self.bn        = nn.BatchNorm2d(out_c)
-        self.act       = nn.PReLU(out_c)
+        self.act       = nn.SiLU(inplace=True)
 
     def forward(self, x, skip):
         x = self.up(x)
@@ -94,7 +81,7 @@ class DecoderBlock_NoPFCU(nn.Module):
         return x
 
 
-class AblModel_MultiDilation(nn.Module):
+class AblModel_SiLU(nn.Module):
     def __init__(self, num_classes=1):
         super().__init__()
         mk = (5, 5)
@@ -125,4 +112,4 @@ class AblModel_MultiDilation(nn.Module):
 
 
 def build_model(num_classes=1):
-    return AblModel_MultiDilation(num_classes=num_classes)
+    return AblModel_SiLU(num_classes=num_classes)

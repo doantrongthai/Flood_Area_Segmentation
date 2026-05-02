@@ -18,11 +18,11 @@ class Axial_PFCU_Single_NoPFCUSkip(nn.Module):
         super().__init__()
         self.branch_r1 = StandardDW(dim, mixer_kernel, dilation=1)
         self.pw_fuse   = nn.Conv2d(dim, dim, kernel_size=1, bias=False)
-        self.bn_fuse   = nn.InstanceNorm2d(dim, affine=True)
+        self.bn_fuse   = nn.BatchNorm2d(dim)
         self.act       = nn.PReLU(dim)
 
     def forward(self, x):
-        b1 = self.branch_r1(x)
+        b1    = self.branch_r1(x)
         fused = self.bn_fuse(self.pw_fuse(b1))
         return self.act(fused)
 
@@ -33,16 +33,15 @@ class EncoderBlock(nn.Module):
         self.same_channels = (in_c == out_c)
         conv_out = out_c - in_c if not self.same_channels else out_c
         self.pfcu      = Axial_PFCU_Single_NoPFCUSkip(in_c, mixer_kernel=mixer_kernel)
-        self.bn        = nn.InstanceNorm2d(in_c, affine=True)
         self.down_pool = nn.MaxPool2d((2, 2))
         if not self.same_channels:
             self.pw      = nn.Conv2d(in_c, conv_out, kernel_size=1, bias=False)
             self.down_pw = nn.MaxPool2d((2, 2))
-        self.bn2 = nn.InstanceNorm2d(out_c, affine=True)
+        self.bn2 = nn.BatchNorm2d(out_c)
         self.act = nn.PReLU(out_c)
 
     def forward(self, x):
-        skip = self.bn(self.pfcu(x))
+        skip = self.pfcu(x)
         pool = self.down_pool(skip)
         if self.same_channels:
             x = self.act(self.bn2(pool))
@@ -56,7 +55,7 @@ class SimpleBottleNeck(nn.Module):
     def __init__(self, dim, max_dim=128):
         super().__init__()
         self.dw  = StandardDW(dim, mixer_kernel=(5, 5), dilation=1)
-        self.bn  = nn.InstanceNorm2d(dim, affine=True)
+        self.bn  = nn.BatchNorm2d(dim)
         self.act = nn.PReLU(dim)
 
     def forward(self, x):
@@ -68,7 +67,7 @@ class DecoderBlock_NoPFCU(nn.Module):
         super().__init__()
         self.up        = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False)
         self.reduce_up = nn.Conv2d(in_c, out_c, 1, bias=False) if in_c != out_c else nn.Identity()
-        self.bn        = nn.InstanceNorm2d(out_c, affine=True)
+        self.bn        = nn.BatchNorm2d(out_c)
         self.act       = nn.PReLU(out_c)
 
     def forward(self, x, skip):
@@ -81,7 +80,7 @@ class DecoderBlock_NoPFCU(nn.Module):
         return x
 
 
-class AblModel_InstanceNorm(nn.Module):
+class AblModel_NoBNAfterPFCU(nn.Module):
     def __init__(self, num_classes=1):
         super().__init__()
         mk = (5, 5)
@@ -112,4 +111,4 @@ class AblModel_InstanceNorm(nn.Module):
 
 
 def build_model(num_classes=1):
-    return AblModel_InstanceNorm(num_classes=num_classes)
+    return AblModel_NoBNAfterPFCU(num_classes=num_classes)
