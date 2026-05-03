@@ -3,28 +3,21 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-class StandardDW(nn.Module):
-    def __init__(self, dim, mixer_kernel, dilation=1):
+class SEBlock(nn.Module):
+    def __init__(self, dim, mixer_kernel=(5, 5), reduction=4):
         super().__init__()
-        k = mixer_kernel[0]
-        self.dw = nn.Conv2d(dim, dim, kernel_size=k, padding='same', groups=dim, dilation=dilation, bias=False)
+        mid = max(dim // reduction, 4)
+        self.gap = nn.AdaptiveAvgPool2d(1)
+        self.fc1 = nn.Conv2d(dim, mid, kernel_size=1, bias=False)
+        self.act = nn.ReLU(inplace=True)
+        self.fc2 = nn.Conv2d(mid, dim, kernel_size=1, bias=False)
+        self.sig = nn.Sigmoid()
 
     def forward(self, x):
-        return x + self.dw(x)
-
-
-class Axial_PFCU_Single_NoPFCUSkip(nn.Module):
-    def __init__(self, dim, mixer_kernel=(5, 5)):
-        super().__init__()
-        self.branch_r1 = StandardDW(dim, mixer_kernel, dilation=1)
-        self.pw_fuse   = nn.Conv2d(dim, dim, kernel_size=1, bias=False)
-        self.bn_fuse   = nn.BatchNorm2d(dim)
-        self.act       = nn.PReLU(dim)
-
-    def forward(self, x):
-        b1    = self.branch_r1(x)
-        fused = self.bn_fuse(self.pw_fuse(b1))
-        return self.act(fused)
+        s = self.gap(x)
+        s = self.act(self.fc1(s))
+        s = self.sig(self.fc2(s))
+        return x * s
 
 
 class EncoderBlock(nn.Module):
@@ -32,7 +25,7 @@ class EncoderBlock(nn.Module):
         super().__init__()
         self.same_channels = (in_c == out_c)
         conv_out = out_c - in_c if not self.same_channels else out_c
-        self.pfcu      = Axial_PFCU_Single_NoPFCUSkip(in_c, mixer_kernel=mixer_kernel)
+        self.pfcu      = SEBlock(in_c, mixer_kernel=mixer_kernel)
         self.bn        = nn.BatchNorm2d(in_c)
         self.down_pool = nn.MaxPool2d((2, 2))
         if not self.same_channels:
@@ -52,10 +45,11 @@ class EncoderBlock(nn.Module):
         return x, skip
 
 
-class SimpleBottleNeck(nn.Module):
+class BottleNeck(nn.Module):
     def __init__(self, dim, max_dim=128):
         super().__init__()
-        self.dw  = StandardDW(dim, mixer_kernel=(5, 5), dilation=1)
+        k = 5
+        self.dw  = nn.Conv2d(dim, dim, kernel_size=k, padding='same', groups=dim, bias=False)
         self.bn  = nn.BatchNorm2d(dim)
         self.act = nn.PReLU(dim)
 
@@ -63,25 +57,25 @@ class SimpleBottleNeck(nn.Module):
         return self.act(self.bn(self.dw(x)))
 
 
-class DecoderBlock_PixelShuffle(nn.Module):
+class Decoder(nn.Module):
     def __init__(self, in_c, out_c, mixer_kernel=(5, 5)):
         super().__init__()
-        self.expand   = nn.Conv2d(in_c, out_c * 4, kernel_size=1, bias=False)
-        self.ps       = nn.PixelShuffle(upscale_factor=2)
-        self.reduce   = nn.Conv2d(in_c, out_c, 1, bias=False) if in_c != out_c else nn.Identity()
-        self.bn       = nn.BatchNorm2d(out_c)
-        self.act      = nn.PReLU(out_c)
+        self.up        = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False)
+        self.reduce_up = nn.Conv2d(in_c, out_c, 1, bias=False) if in_c != out_c else nn.Identity()
+        self.bn        = nn.BatchNorm2d(out_c)
+        self.act       = nn.PReLU(out_c)
 
     def forward(self, x, skip):
-        x = self.ps(self.expand(x))
+        x = self.up(x)
+        x = self.reduce_up(x)
         if x.shape[2:] != skip.shape[2:]:
             x = F.interpolate(x, size=skip.shape[2:], mode='bilinear', align_corners=False)
-        x = x + self.reduce(skip) if x.shape[1] != skip.shape[1] else x + skip
+        x = x + skip
         x = self.act(self.bn(x))
         return x
 
 
-class AblModel_PixelShuffleUp(nn.Module):
+class AblModel_SEBlock(nn.Module):
     def __init__(self, num_classes=1):
         super().__init__()
         mk = (5, 5)
@@ -90,11 +84,11 @@ class AblModel_PixelShuffleUp(nn.Module):
         self.e2 = EncoderBlock(32,  64,  mixer_kernel=mk)
         self.e3 = EncoderBlock(64,  128, mixer_kernel=mk)
         self.e4 = EncoderBlock(128, 256, mixer_kernel=mk)
-        self.b4 = SimpleBottleNeck(256, max_dim=128)
-        self.d4 = DecoderBlock_PixelShuffle(256, 128, mixer_kernel=mk)
-        self.d3 = DecoderBlock_PixelShuffle(128, 64,  mixer_kernel=mk)
-        self.d2 = DecoderBlock_PixelShuffle(64,  32,  mixer_kernel=mk)
-        self.d1 = DecoderBlock_PixelShuffle(32,  16,  mixer_kernel=mk)
+        self.b4 = BottleNeck(256, max_dim=128)
+        self.d4 = Decoder(256, 128, mixer_kernel=mk)
+        self.d3 = Decoder(128, 64,  mixer_kernel=mk)
+        self.d2 = Decoder(64,  32,  mixer_kernel=mk)
+        self.d1 = Decoder(32,  16,  mixer_kernel=mk)
         self.conv_out = nn.Conv2d(16, num_classes, kernel_size=1)
 
     def forward(self, x):
@@ -112,4 +106,4 @@ class AblModel_PixelShuffleUp(nn.Module):
 
 
 def build_model(num_classes=1):
-    return AblModel_PixelShuffleUp(num_classes=num_classes)
+    return AblModel_SEBlock(num_classes=num_classes)

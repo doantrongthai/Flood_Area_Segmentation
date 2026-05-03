@@ -3,28 +3,26 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-class ResidualDW(nn.Module):
-    def __init__(self, dim, mixer_kernel, dilation=1):
+class InvBottleneck(nn.Module):
+    def __init__(self, dim, mixer_kernel=(5, 5), expand_ratio=2):
         super().__init__()
-        k = mixer_kernel[0]
-        self.dw = nn.Conv2d(dim, dim, kernel_size=k, padding='same', groups=dim, dilation=dilation, bias=False)
+        mid = dim * expand_ratio
+        k   = mixer_kernel[0]
+        self.pw_up  = nn.Conv2d(dim, mid, kernel_size=1, bias=False)
+        self.bn_up  = nn.BatchNorm2d(mid)
+        self.act_up = nn.PReLU(mid)
+        self.dw     = nn.Conv2d(mid, mid, kernel_size=k, padding='same', groups=mid, bias=False)
+        self.bn_dw  = nn.BatchNorm2d(mid)
+        self.act_dw = nn.PReLU(mid)
+        self.pw_dn  = nn.Conv2d(mid, dim, kernel_size=1, bias=False)
+        self.bn_dn  = nn.BatchNorm2d(dim)
+        self.act_dn = nn.PReLU(dim)
 
     def forward(self, x):
-        return x + self.dw(x)
-
-
-class SRP(nn.Module):
-    def __init__(self, dim, mixer_kernel=(5, 5)):
-        super().__init__()
-        self.branch_r1 = ResidualDW(dim, mixer_kernel, dilation=1)
-        self.pw_fuse   = nn.Conv2d(dim, dim, kernel_size=1, bias=False)
-        self.bn_fuse   = nn.BatchNorm2d(dim)
-        self.act       = nn.PReLU(dim)
-
-    def forward(self, x):
-        b1 = self.branch_r1(x)
-        fused = self.bn_fuse(self.pw_fuse(b1))
-        return self.act(fused)
+        out = self.act_up(self.bn_up(self.pw_up(x)))
+        out = self.act_dw(self.bn_dw(self.dw(out)))
+        out = self.act_dn(self.bn_dn(self.pw_dn(out)))
+        return out
 
 
 class EncoderBlock(nn.Module):
@@ -32,7 +30,7 @@ class EncoderBlock(nn.Module):
         super().__init__()
         self.same_channels = (in_c == out_c)
         conv_out = out_c - in_c if not self.same_channels else out_c
-        self.pfcu      = SRP(in_c, mixer_kernel=mixer_kernel)
+        self.pfcu      = InvBottleneck(in_c, mixer_kernel=mixer_kernel)
         self.bn        = nn.BatchNorm2d(in_c)
         self.down_pool = nn.MaxPool2d((2, 2))
         if not self.same_channels:
@@ -55,7 +53,7 @@ class EncoderBlock(nn.Module):
 class BottleNeck(nn.Module):
     def __init__(self, dim, max_dim=128):
         super().__init__()
-        self.dw  = ResidualDW(dim, mixer_kernel=(5, 5), dilation=1)
+        self.dw  = nn.Conv2d(dim, dim, kernel_size=5, padding='same', groups=dim, bias=False)
         self.bn  = nn.BatchNorm2d(dim)
         self.act = nn.PReLU(dim)
 
@@ -81,7 +79,7 @@ class Decoder(nn.Module):
         return x
 
 
-class DWSeg_Lite(nn.Module):
+class AblModel_InvBottleneck(nn.Module):
     def __init__(self, num_classes=1):
         super().__init__()
         mk = (5, 5)
@@ -112,4 +110,4 @@ class DWSeg_Lite(nn.Module):
 
 
 def build_model(num_classes=1):
-    return DWSeg_Lite(num_classes=num_classes)
+    return AblModel_InvBottleneck(num_classes=num_classes)

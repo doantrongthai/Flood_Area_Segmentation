@@ -3,28 +3,16 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-class ResidualDW(nn.Module):
-    def __init__(self, dim, mixer_kernel, dilation=1):
-        super().__init__()
-        k = mixer_kernel[0]
-        self.dw = nn.Conv2d(dim, dim, kernel_size=k, padding='same', groups=dim, dilation=dilation, bias=False)
-
-    def forward(self, x):
-        return x + self.dw(x)
-
-
-class SRP(nn.Module):
+class StdConvSRP(nn.Module):
     def __init__(self, dim, mixer_kernel=(5, 5)):
         super().__init__()
-        self.branch_r1 = ResidualDW(dim, mixer_kernel, dilation=1)
-        self.pw_fuse   = nn.Conv2d(dim, dim, kernel_size=1, bias=False)
-        self.bn_fuse   = nn.BatchNorm2d(dim)
-        self.act       = nn.PReLU(dim)
+        k = mixer_kernel[0]
+        self.conv = nn.Conv2d(dim, dim, kernel_size=k, padding='same', bias=False)
+        self.bn   = nn.BatchNorm2d(dim)
+        self.act  = nn.PReLU(dim)
 
     def forward(self, x):
-        b1 = self.branch_r1(x)
-        fused = self.bn_fuse(self.pw_fuse(b1))
-        return self.act(fused)
+        return self.act(self.bn(self.conv(x)))
 
 
 class EncoderBlock(nn.Module):
@@ -32,7 +20,7 @@ class EncoderBlock(nn.Module):
         super().__init__()
         self.same_channels = (in_c == out_c)
         conv_out = out_c - in_c if not self.same_channels else out_c
-        self.pfcu      = SRP(in_c, mixer_kernel=mixer_kernel)
+        self.pfcu      = StdConvSRP(in_c, mixer_kernel=mixer_kernel)
         self.bn        = nn.BatchNorm2d(in_c)
         self.down_pool = nn.MaxPool2d((2, 2))
         if not self.same_channels:
@@ -55,7 +43,7 @@ class EncoderBlock(nn.Module):
 class BottleNeck(nn.Module):
     def __init__(self, dim, max_dim=128):
         super().__init__()
-        self.dw  = ResidualDW(dim, mixer_kernel=(5, 5), dilation=1)
+        self.dw  = nn.Conv2d(dim, dim, kernel_size=5, padding='same', groups=dim, bias=False)
         self.bn  = nn.BatchNorm2d(dim)
         self.act = nn.PReLU(dim)
 
@@ -81,7 +69,7 @@ class Decoder(nn.Module):
         return x
 
 
-class DWSeg_Lite(nn.Module):
+class AblModel_StdConv(nn.Module):
     def __init__(self, num_classes=1):
         super().__init__()
         mk = (5, 5)
@@ -112,4 +100,4 @@ class DWSeg_Lite(nn.Module):
 
 
 def build_model(num_classes=1):
-    return DWSeg_Lite(num_classes=num_classes)
+    return AblModel_StdConv(num_classes=num_classes)

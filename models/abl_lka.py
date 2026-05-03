@@ -3,28 +3,19 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-class StandardDW(nn.Module):
-    def __init__(self, dim, mixer_kernel, dilation=1):
-        super().__init__()
-        k = mixer_kernel[0]
-        self.dw = nn.Conv2d(dim, dim, kernel_size=k, padding='same', groups=dim, dilation=dilation, bias=False)
-
-    def forward(self, x):
-        return x + self.dw(x)
-
-
-class Axial_PFCU_Single_NoPFCUSkip(nn.Module):
+class LKA(nn.Module):
     def __init__(self, dim, mixer_kernel=(5, 5)):
         super().__init__()
-        self.branch_r1 = StandardDW(dim, mixer_kernel, dilation=1)
-        self.pw_fuse   = nn.Conv2d(dim, dim, kernel_size=1, bias=False)
-        self.bn_fuse   = nn.BatchNorm2d(dim)
-        self.act       = nn.SiLU(inplace=True)
+        k = mixer_kernel[0]
+        self.dw      = nn.Conv2d(dim, dim, kernel_size=k, padding='same', groups=dim, bias=False)
+        self.dw_dil  = nn.Conv2d(dim, dim, kernel_size=k, padding='same', groups=dim, dilation=2, bias=False)
+        self.pw      = nn.Conv2d(dim, dim, kernel_size=1, bias=False)
+        self.bn      = nn.BatchNorm2d(dim)
+        self.act     = nn.PReLU(dim)
 
     def forward(self, x):
-        b1    = self.branch_r1(x)
-        fused = self.bn_fuse(self.pw_fuse(b1))
-        return self.act(fused)
+        attn = self.pw(self.dw_dil(self.dw(x)))
+        return self.act(self.bn(x * attn))
 
 
 class EncoderBlock(nn.Module):
@@ -32,14 +23,14 @@ class EncoderBlock(nn.Module):
         super().__init__()
         self.same_channels = (in_c == out_c)
         conv_out = out_c - in_c if not self.same_channels else out_c
-        self.pfcu      = Axial_PFCU_Single_NoPFCUSkip(in_c, mixer_kernel=mixer_kernel)
+        self.pfcu      = LKA(in_c, mixer_kernel=mixer_kernel)
         self.bn        = nn.BatchNorm2d(in_c)
         self.down_pool = nn.MaxPool2d((2, 2))
         if not self.same_channels:
             self.pw      = nn.Conv2d(in_c, conv_out, kernel_size=1, bias=False)
             self.down_pw = nn.MaxPool2d((2, 2))
         self.bn2 = nn.BatchNorm2d(out_c)
-        self.act = nn.SiLU(inplace=True)
+        self.act = nn.PReLU(out_c)
 
     def forward(self, x):
         skip = self.bn(self.pfcu(x))
@@ -52,24 +43,24 @@ class EncoderBlock(nn.Module):
         return x, skip
 
 
-class SimpleBottleNeck(nn.Module):
+class BottleNeck(nn.Module):
     def __init__(self, dim, max_dim=128):
         super().__init__()
-        self.dw  = StandardDW(dim, mixer_kernel=(5, 5), dilation=1)
+        self.dw  = nn.Conv2d(dim, dim, kernel_size=5, padding='same', groups=dim, bias=False)
         self.bn  = nn.BatchNorm2d(dim)
-        self.act = nn.SiLU(inplace=True)
+        self.act = nn.PReLU(dim)
 
     def forward(self, x):
         return self.act(self.bn(self.dw(x)))
 
 
-class DecoderBlock_NoPFCU(nn.Module):
+class Decoder(nn.Module):
     def __init__(self, in_c, out_c, mixer_kernel=(5, 5)):
         super().__init__()
         self.up        = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False)
         self.reduce_up = nn.Conv2d(in_c, out_c, 1, bias=False) if in_c != out_c else nn.Identity()
         self.bn        = nn.BatchNorm2d(out_c)
-        self.act       = nn.SiLU(inplace=True)
+        self.act       = nn.PReLU(out_c)
 
     def forward(self, x, skip):
         x = self.up(x)
@@ -81,7 +72,7 @@ class DecoderBlock_NoPFCU(nn.Module):
         return x
 
 
-class AblModel_SiLU(nn.Module):
+class AblModel_LKA(nn.Module):
     def __init__(self, num_classes=1):
         super().__init__()
         mk = (5, 5)
@@ -90,11 +81,11 @@ class AblModel_SiLU(nn.Module):
         self.e2 = EncoderBlock(32,  64,  mixer_kernel=mk)
         self.e3 = EncoderBlock(64,  128, mixer_kernel=mk)
         self.e4 = EncoderBlock(128, 256, mixer_kernel=mk)
-        self.b4 = SimpleBottleNeck(256, max_dim=128)
-        self.d4 = DecoderBlock_NoPFCU(256, 128, mixer_kernel=mk)
-        self.d3 = DecoderBlock_NoPFCU(128, 64,  mixer_kernel=mk)
-        self.d2 = DecoderBlock_NoPFCU(64,  32,  mixer_kernel=mk)
-        self.d1 = DecoderBlock_NoPFCU(32,  16,  mixer_kernel=mk)
+        self.b4 = BottleNeck(256, max_dim=128)
+        self.d4 = Decoder(256, 128, mixer_kernel=mk)
+        self.d3 = Decoder(128, 64,  mixer_kernel=mk)
+        self.d2 = Decoder(64,  32,  mixer_kernel=mk)
+        self.d1 = Decoder(32,  16,  mixer_kernel=mk)
         self.conv_out = nn.Conv2d(16, num_classes, kernel_size=1)
 
     def forward(self, x):
@@ -112,4 +103,4 @@ class AblModel_SiLU(nn.Module):
 
 
 def build_model(num_classes=1):
-    return AblModel_SiLU(num_classes=num_classes)
+    return AblModel_LKA(num_classes=num_classes)

@@ -3,28 +3,46 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-class ResidualDW(nn.Module):
-    def __init__(self, dim, mixer_kernel, dilation=1):
+class ChannelAttn(nn.Module):
+    def __init__(self, dim, reduction=4):
         super().__init__()
-        k = mixer_kernel[0]
-        self.dw = nn.Conv2d(dim, dim, kernel_size=k, padding='same', groups=dim, dilation=dilation, bias=False)
+        mid = max(dim // reduction, 4)
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        self.max_pool = nn.AdaptiveMaxPool2d(1)
+        self.fc1 = nn.Conv2d(dim, mid, kernel_size=1, bias=False)
+        self.act = nn.ReLU(inplace=True)
+        self.fc2 = nn.Conv2d(mid, dim, kernel_size=1, bias=False)
+        self.sig = nn.Sigmoid()
 
     def forward(self, x):
-        return x + self.dw(x)
+        avg = self.sig(self.fc2(self.act(self.fc1(self.avg_pool(x)))))
+        mx  = self.sig(self.fc2(self.act(self.fc1(self.max_pool(x)))))
+        return x * (avg + mx)
 
 
-class SRP(nn.Module):
+class SpatialAttn(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.conv = nn.Conv2d(2, 1, kernel_size=7, padding=3, bias=False)
+        self.sig  = nn.Sigmoid()
+
+    def forward(self, x):
+        avg = x.mean(dim=1, keepdim=True)
+        mx  = x.max(dim=1, keepdim=True)[0]
+        s   = torch.cat([avg, mx], dim=1)
+        return x * self.sig(self.conv(s))
+
+
+class CBAM(nn.Module):
     def __init__(self, dim, mixer_kernel=(5, 5)):
         super().__init__()
-        self.branch_r1 = ResidualDW(dim, mixer_kernel, dilation=1)
-        self.pw_fuse   = nn.Conv2d(dim, dim, kernel_size=1, bias=False)
-        self.bn_fuse   = nn.BatchNorm2d(dim)
-        self.act       = nn.PReLU(dim)
+        self.ca = ChannelAttn(dim)
+        self.sa = SpatialAttn()
 
     def forward(self, x):
-        b1 = self.branch_r1(x)
-        fused = self.bn_fuse(self.pw_fuse(b1))
-        return self.act(fused)
+        x = self.ca(x)
+        x = self.sa(x)
+        return x
 
 
 class EncoderBlock(nn.Module):
@@ -32,7 +50,7 @@ class EncoderBlock(nn.Module):
         super().__init__()
         self.same_channels = (in_c == out_c)
         conv_out = out_c - in_c if not self.same_channels else out_c
-        self.pfcu      = SRP(in_c, mixer_kernel=mixer_kernel)
+        self.pfcu      = CBAM(in_c, mixer_kernel=mixer_kernel)
         self.bn        = nn.BatchNorm2d(in_c)
         self.down_pool = nn.MaxPool2d((2, 2))
         if not self.same_channels:
@@ -55,7 +73,7 @@ class EncoderBlock(nn.Module):
 class BottleNeck(nn.Module):
     def __init__(self, dim, max_dim=128):
         super().__init__()
-        self.dw  = ResidualDW(dim, mixer_kernel=(5, 5), dilation=1)
+        self.dw  = nn.Conv2d(dim, dim, kernel_size=5, padding='same', groups=dim, bias=False)
         self.bn  = nn.BatchNorm2d(dim)
         self.act = nn.PReLU(dim)
 
@@ -81,7 +99,7 @@ class Decoder(nn.Module):
         return x
 
 
-class DWSeg_Lite(nn.Module):
+class AblModel_CBAM(nn.Module):
     def __init__(self, num_classes=1):
         super().__init__()
         mk = (5, 5)
@@ -112,4 +130,4 @@ class DWSeg_Lite(nn.Module):
 
 
 def build_model(num_classes=1):
-    return DWSeg_Lite(num_classes=num_classes)
+    return AblModel_CBAM(num_classes=num_classes)
