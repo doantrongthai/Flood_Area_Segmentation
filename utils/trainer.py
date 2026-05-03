@@ -100,7 +100,16 @@ def train_segmentation(model_name, loss_name, size, epochs, batch_size, lr,
     save_path = os.path.join(output_path, f'{model_name}_{loss_name}_{dataset}_s{seed}.pth')
     
     best_val_loss = float('inf')
-    
+
+    # ── Per-epoch log (dùng để vẽ convergence & P-R curve) ──────────────
+    epoch_log = {
+        'train_loss': [], 'val_loss': [],
+        'val_miou': [], 'val_dice': [],
+        'val_precision': [], 'val_recall': []
+    }
+    log_path = os.path.join(output_path, f'{model_name}_{loss_name}_{dataset}_s{seed}_epochlog.json')
+    # ─────────────────────────────────────────────────────────────────────
+
     print(f"\n{'='*70}")
     print(f"TRAINING START - {epochs} EPOCHS")
     print(f"{'='*70}")
@@ -149,22 +158,49 @@ def train_segmentation(model_name, loss_name, size, epochs, batch_size, lr,
         
         model.eval()
         val_loss = 0.0
-        
+        val_preds_epoch  = []
+        val_labels_epoch = []
+
         with torch.no_grad():
             for images, masks in tqdm(val_loader, desc=f"Epoch {epoch+1}/{epochs} [Val]", 
                                      leave=False, ncols=100):
                 images = images.to(device, non_blocking=False)
-                masks = masks.to(device, non_blocking=False)
-                
+                masks  = masks.to(device, non_blocking=False)
+
                 outputs = model(images)
+                if isinstance(outputs, (list, tuple)):
+                    outputs = outputs[0]
                 loss = criterion(outputs, masks)
                 val_loss += loss.item()
-        
+
+                if num_classes == 1:
+                    preds = torch.sigmoid(outputs)
+                else:
+                    preds = torch.softmax(outputs, dim=1)
+
+                val_preds_epoch.extend(preds.cpu().numpy())
+                val_labels_epoch.extend(masks.cpu().numpy())
+
         avg_val_loss = val_loss / len(val_loader)
+
+        from utils.metrics import (calculate_miou, calculate_dice_score,
+                                   calculate_precision, calculate_recall)
+        ep_miou      = calculate_miou(val_preds_epoch, val_labels_epoch, num_classes)
+        ep_dice      = calculate_dice_score(val_preds_epoch, val_labels_epoch, num_classes)
+        ep_precision = calculate_precision(val_preds_epoch, val_labels_epoch, num_classes)
+        ep_recall    = calculate_recall(val_preds_epoch, val_labels_epoch, num_classes)
+
+        epoch_log['train_loss'].append(avg_train_loss)
+        epoch_log['val_loss'].append(avg_val_loss)
+        epoch_log['val_miou'].append(ep_miou)
+        epoch_log['val_dice'].append(ep_dice)
+        epoch_log['val_precision'].append(ep_precision)
+        epoch_log['val_recall'].append(ep_recall)
         
         print(f"Epoch {epoch+1:3d}/{epochs} | "
               f"Train: {avg_train_loss:.6f} | "
-              f"Val: {avg_val_loss:.6f}", end='')
+              f"Val: {avg_val_loss:.6f} | "
+              f"P: {ep_precision:.4f} | R: {ep_recall:.4f}", end='')
         scheduler.step()
         if avg_val_loss < best_val_loss:
             best_val_loss = avg_val_loss
@@ -199,6 +235,11 @@ def train_segmentation(model_name, loss_name, size, epochs, batch_size, lr,
             print(" ✓ Best")
         else:
             print()
+
+        # Lưu log sau mỗi epoch (overwrite) → nếu crash vẫn còn data
+        import json
+        with open(log_path, 'w') as f:
+            json.dump(epoch_log, f, indent=2)
     
     print(f"\n{'='*70}")
     print("TESTING")
@@ -268,6 +309,7 @@ def train_segmentation(model_name, loss_name, size, epochs, batch_size, lr,
     print(f"Latency:          {inference_stats['latency_ms']:.4f} ms")
     print(f"\n{'='*70}")
     print(f"Saved:            {save_path}")
+    print(f"Epoch Log:        {log_path}")
     print(f"{'='*70}\n")
     
     return {
@@ -279,6 +321,8 @@ def train_segmentation(model_name, loss_name, size, epochs, batch_size, lr,
         'recall': recall,
         'best_val_loss': best_val_loss,
         'model_path': save_path,
+        'epoch_log': epoch_log,
+        'log_path': log_path,
         'complexity': complexity,
         'inference_stats': inference_stats
     }
