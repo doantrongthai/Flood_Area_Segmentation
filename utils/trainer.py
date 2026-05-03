@@ -233,11 +233,13 @@ def train_segmentation(model_name, loss_name, size, epochs, batch_size, lr,
             all_preds.extend(preds.cpu().numpy())
             all_labels.extend(masks.cpu().numpy())
     
-    from utils.metrics import calculate_miou, calculate_dice_score, calculate_pixel_accuracy
+    from utils.metrics import calculate_miou, calculate_dice_score, calculate_pixel_accuracy, calculate_precision, calculate_recall
     
-    miou = calculate_miou(all_preds, all_labels, num_classes)
-    dice = calculate_dice_score(all_preds, all_labels, num_classes)
+    miou      = calculate_miou(all_preds, all_labels, num_classes)
+    dice      = calculate_dice_score(all_preds, all_labels, num_classes)
     pixel_acc = calculate_pixel_accuracy(all_preds, all_labels, num_classes)
+    precision = calculate_precision(all_preds, all_labels, num_classes)
+    recall    = calculate_recall(all_preds, all_labels, num_classes)
     
     avg_test_loss = test_loss / len(test_loader)
     
@@ -248,6 +250,8 @@ def train_segmentation(model_name, loss_name, size, epochs, batch_size, lr,
     print(f"mIOU:             {miou:.10f}")
     print(f"Dice Score:       {dice:.10f}")
     print(f"Pixel Accuracy:   {pixel_acc:.10f}")
+    print(f"Precision:        {precision:.10f}")
+    print(f"Recall:           {recall:.10f}")
     print(f"Best Val Loss:    {best_val_loss:.10f}")
     print(f"\n{'='*70}")
     print("MODEL COMPLEXITY")
@@ -271,6 +275,8 @@ def train_segmentation(model_name, loss_name, size, epochs, batch_size, lr,
         'miou': miou,
         'dice': dice,
         'pixel_accuracy': pixel_acc,
+        'precision': precision,
+        'recall': recall,
         'best_val_loss': best_val_loss,
         'model_path': save_path,
         'complexity': complexity,

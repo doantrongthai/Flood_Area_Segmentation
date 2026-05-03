@@ -118,6 +118,78 @@ def calculate_pixel_accuracy(all_preds, all_labels, num_classes, threshold=0.5):
     return float(correct / total)
 
 
+def calculate_precision(all_preds, all_labels, num_classes, threshold=0.5):
+    all_preds = np.array(all_preds)
+    all_labels = np.array(all_labels)
+
+    if num_classes == 1:
+        if all_preds.ndim == 4:
+            all_preds = all_preds.squeeze(1)
+        if all_labels.ndim == 4:
+            all_labels = all_labels.squeeze(1)
+
+        all_preds  = (all_preds > threshold).astype(np.uint8).reshape(-1)
+        all_labels = all_labels.astype(np.uint8).reshape(-1)
+
+        tp = np.logical_and(all_preds, all_labels).sum()
+        fp = np.logical_and(all_preds, 1 - all_labels).sum()
+
+        return float(tp / (tp + fp + 1e-8))
+
+    else:
+        preds_class = np.argmax(all_preds, axis=1)
+        if all_labels.ndim == 4:
+            all_labels = all_labels.squeeze(1)
+
+        preds_flat  = preds_class.reshape(-1)
+        labels_flat = all_labels.reshape(-1)
+
+        precisions = []
+        for cls in range(num_classes):
+            tp = np.logical_and(preds_flat == cls, labels_flat == cls).sum()
+            fp = np.logical_and(preds_flat == cls, labels_flat != cls).sum()
+            if tp + fp > 0:
+                precisions.append(float(tp / (tp + fp + 1e-8)))
+
+        return float(np.mean(precisions)) if precisions else 0.0
+
+
+def calculate_recall(all_preds, all_labels, num_classes, threshold=0.5):
+    all_preds = np.array(all_preds)
+    all_labels = np.array(all_labels)
+
+    if num_classes == 1:
+        if all_preds.ndim == 4:
+            all_preds = all_preds.squeeze(1)
+        if all_labels.ndim == 4:
+            all_labels = all_labels.squeeze(1)
+
+        all_preds  = (all_preds > threshold).astype(np.uint8).reshape(-1)
+        all_labels = all_labels.astype(np.uint8).reshape(-1)
+
+        tp = np.logical_and(all_preds, all_labels).sum()
+        fn = np.logical_and(1 - all_preds, all_labels).sum()
+
+        return float(tp / (tp + fn + 1e-8))
+
+    else:
+        preds_class = np.argmax(all_preds, axis=1)
+        if all_labels.ndim == 4:
+            all_labels = all_labels.squeeze(1)
+
+        preds_flat  = preds_class.reshape(-1)
+        labels_flat = all_labels.reshape(-1)
+
+        recalls = []
+        for cls in range(num_classes):
+            tp = np.logical_and(preds_flat == cls, labels_flat == cls).sum()
+            fn = np.logical_and(preds_flat != cls, labels_flat == cls).sum()
+            if tp + fn > 0:
+                recalls.append(float(tp / (tp + fn + 1e-8)))
+
+        return float(np.mean(recalls)) if recalls else 0.0
+
+
 def calculate_model_complexity(model, input_size=(1, 3, 512, 512), device='cuda'):
     model.eval()
     
