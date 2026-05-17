@@ -1,6 +1,5 @@
 from .bce import build_loss as build_bce
 from .dice import build_loss as build_dice
-from .bce_dice import build_loss as build_bce_dice
 from .focal import build_loss as build_focal
 from .tversky import build_loss as build_tversky
 from .hard_afm import build_loss as build_hard_afm
@@ -10,7 +9,6 @@ def get_loss(loss_name, num_classes=1):
     all_losses = {
         'bce': build_bce,
         'dice': build_dice,
-        'bce_dice': build_bce_dice,
         'focal': build_focal,
         'tversky': build_tversky,
         'hard_afm': build_hard_afm,
