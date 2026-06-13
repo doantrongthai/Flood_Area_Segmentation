@@ -213,33 +213,48 @@ def calculate_model_complexity(model, input_size=(1, 3, 512, 512), device='cuda'
     else:
         memory_allocated = 0.0
     
-    total_ops = 0
-    hooks = []
-    
-    def count_ops_hook(module, input, output):
-        nonlocal total_ops
-        if isinstance(module, torch.nn.Conv2d):
-            batch_size = input[0].size(0)
-            output_height = output.size(2)
-            output_width = output.size(3)
-            kernel_ops = module.kernel_size[0] * module.kernel_size[1] * module.in_channels
-            output_ops = output_height * output_width * module.out_channels
-            total_ops += batch_size * kernel_ops * output_ops
-        elif isinstance(module, torch.nn.Linear):
-            batch_size = input[0].size(0)
-            total_ops += batch_size * module.in_features * module.out_features
-    
-    for module in model.modules():
-        if isinstance(module, (torch.nn.Conv2d, torch.nn.Linear)):
-            hooks.append(module.register_forward_hook(count_ops_hook))
-    
-    with torch.no_grad():
-        _ = model(dummy_input)
-    
-    for hook in hooks:
-        hook.remove()
-    
-    gflops = total_ops / 1e9
+    # ── GFLOPs via fvcore (primary) ──────────────────────────────────────
+    # fvcore counts 1 MAC = 2 FLOPs (multiply + add separately).
+    # Most CV papers use the convention 1 MAC = 1 "FLOP" (i.e. GMACs).
+    # → gflops_paper = fa.total() / 2 / 1e9  if comparing with GMACs-based baselines
+    # → gflops_paper = fa.total() / 1e9       if your paper counts MUL+ADD as 2 FLOPs
+    # Adjust the divisor below to match the convention used in your comparison table.
+    try:
+        from fvcore.nn import FlopCountAnalysis
+        fa = FlopCountAnalysis(model, dummy_input)
+        fa.unsupported_ops_warnings(False)
+        fa.uncalled_modules_warnings(False)
+        gflops = fa.total() / 2 / 1e9   # ← GMACs convention (change /2 if needed)
+    except Exception as e:
+        print(f"⚠️  fvcore GFLOPs failed ({e}), using manual fallback")
+        # ── Manual fallback (fixed: handles groups for depthwise conv) ────
+        total_ops = 0
+        hooks     = []
+
+        def count_ops_hook(module, input, output):
+            nonlocal total_ops
+            if isinstance(module, torch.nn.Conv2d):
+                batch_size    = input[0].size(0)
+                output_height = output.size(2)
+                output_width  = output.size(3)
+                # FIX: divide by groups (critical for depthwise separable conv)
+                kernel_ops = (module.kernel_size[0] * module.kernel_size[1]
+                              * (module.in_channels // module.groups))
+                output_ops = output_height * output_width * module.out_channels
+                total_ops += batch_size * kernel_ops * output_ops
+            elif isinstance(module, torch.nn.Linear):
+                batch_size = input[0].size(0)
+                total_ops += batch_size * module.in_features * module.out_features
+
+        for m in model.modules():
+            if isinstance(m, (torch.nn.Conv2d, torch.nn.Linear)):
+                hooks.append(m.register_forward_hook(count_ops_hook))
+        with torch.no_grad():
+            _ = model(dummy_input)
+        for h in hooks:
+            h.remove()
+        gflops = total_ops / 1e9
+    # ─────────────────────────────────────────────────────────────────────
     
     return {
         'total_params': total_params,
