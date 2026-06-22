@@ -190,7 +190,7 @@ def calculate_recall(all_preds, all_labels, num_classes, threshold=0.5):
         return float(np.mean(recalls)) if recalls else 0.0
 
 
-def calculate_model_complexity(model, input_size=(1, 3, 512, 512), device='cuda'):
+def calculate_model_complexity(model, input_size=(1, 3, 256, 256), device='cuda'):
     model.eval()
     
     total_params = sum(p.numel() for p in model.parameters())
@@ -265,7 +265,7 @@ def calculate_model_complexity(model, input_size=(1, 3, 512, 512), device='cuda'
     }
 
 
-def measure_inference_time(model, input_size=(1, 3, 512, 512), device='cuda', warmup=10, iterations=100):
+def measure_inference_time(model, input_size=(1, 3, 256, 256), device='cuda', warmup=10, iterations=100):
     model.eval()
     dummy_input = torch.randn(input_size).to(device)
     
