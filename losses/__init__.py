@@ -3,6 +3,7 @@ from .dice import build_loss as build_dice
 from .focal import build_loss as build_focal
 from .tversky import build_loss as build_tversky
 from .hard_afm import build_loss as build_hard_afm
+from .ablation import build_sfmi, build_hard_afm_l0u1, build_focal_a75
 import inspect
 
 def get_loss(loss_name, num_classes=1):
@@ -12,6 +13,10 @@ def get_loss(loss_name, num_classes=1):
         'focal': build_focal,
         'tversky': build_tversky,
         'hard_afm': build_hard_afm,
+        # loss ablation (losses/ablation.py)
+        'sfmi': build_sfmi,
+        'hard_afm_l0u1': build_hard_afm_l0u1,
+        'focal_a75': build_focal_a75,
     }
 
     if loss_name not in all_losses:

@@ -115,6 +115,7 @@ def run_multiseed_experiments(args, seeds):
             'total_params': result['complexity']['total_params'],
             'model_size_mb': result['complexity']['model_size_mb'],
             'memory_mb': result['complexity']['memory_mb'],
+            'gmacs': result['complexity']['gmacs'],
             'gflops': result['complexity']['gflops'],
             'fps': result['inference_stats']['fps'],
             'latency_ms': result['inference_stats']['latency_ms'],
@@ -164,6 +165,7 @@ def run_multiseed_experiments(args, seeds):
                 'total_params': results[0]['total_params'],
                 'model_size_mb': results[0]['model_size_mb'],
                 'memory_mb': results[0]['memory_mb'],
+                'gmacs': results[0]['gmacs'],
                 'gflops': results[0]['gflops']
             }
         }, f, indent=2)

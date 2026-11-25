@@ -1,3 +1,4 @@
+import copy
 import torch
 import numpy as np
 import time
@@ -213,56 +214,44 @@ def calculate_model_complexity(model, input_size=(1, 3, 256, 256), device='cuda'
     else:
         memory_allocated = 0.0
     
-    # ── GFLOPs via fvcore (primary) ──────────────────────────────────────
-    # fvcore counts 1 MAC = 2 FLOPs (multiply + add separately).
-    # Most CV papers use the convention 1 MAC = 1 "FLOP" (i.e. GMACs).
-    # → gflops_paper = fa.total() / 2 / 1e9  if comparing with GMACs-based baselines
-    # → gflops_paper = fa.total() / 1e9       if your paper counts MUL+ADD as 2 FLOPs
-    # Adjust the divisor below to match the convention used in your comparison table.
-    try:
-        from fvcore.nn import FlopCountAnalysis
-        fa = FlopCountAnalysis(model, dummy_input)
-        fa.unsupported_ops_warnings(False)
-        fa.uncalled_modules_warnings(False)
-        gflops = fa.total() / 2 / 1e9   # ← GMACs convention (change /2 if needed)
-    except Exception as e:
-        print(f"⚠️  fvcore GFLOPs failed ({e}), using manual fallback")
-        # ── Manual fallback (fixed: handles groups for depthwise conv) ────
-        total_ops = 0
-        hooks     = []
+    gmacs = count_gmacs(model, input_size)
 
-        def count_ops_hook(module, input, output):
-            nonlocal total_ops
-            if isinstance(module, torch.nn.Conv2d):
-                batch_size    = input[0].size(0)
-                output_height = output.size(2)
-                output_width  = output.size(3)
-                # FIX: divide by groups (critical for depthwise separable conv)
-                kernel_ops = (module.kernel_size[0] * module.kernel_size[1]
-                              * (module.in_channels // module.groups))
-                output_ops = output_height * output_width * module.out_channels
-                total_ops += batch_size * kernel_ops * output_ops
-            elif isinstance(module, torch.nn.Linear):
-                batch_size = input[0].size(0)
-                total_ops += batch_size * module.in_features * module.out_features
-
-        for m in model.modules():
-            if isinstance(m, (torch.nn.Conv2d, torch.nn.Linear)):
-                hooks.append(m.register_forward_hook(count_ops_hook))
-        with torch.no_grad():
-            _ = model(dummy_input)
-        for h in hooks:
-            h.remove()
-        gflops = total_ops / 1e9
-    # ─────────────────────────────────────────────────────────────────────
-    
     return {
         'total_params': total_params,
         'trainable_params': trainable_params,
         'model_size_mb': model_size_mb,
         'memory_mb': memory_allocated,
-        'gflops': gflops
+        'gmacs': gmacs,            # value reported in the paper (1e9 multiply-accumulates)
+        'gflops': 2 * gmacs        # 1 MAC = 2 floating-point operations
     }
+
+
+def count_gmacs(model, input_size=(1, 3, 256, 256)):
+    """
+    Multiply-accumulate operations (in 1e9) counted with ptflops, which includes grouped,
+    depthwise and padding='same' convolutions. Counting runs on a copy, so the model that is
+    about to be trained is not modified. Returns NaN with a warning if counting is impossible.
+    """
+    try:
+        from ptflops import get_model_complexity_info
+
+        clone = copy.deepcopy(model).eval()
+        # A2FPN also keeps its backbone as base_model / base_layers (not used in forward);
+        # ptflops would count those layers twice.
+        if type(clone).__name__ == 'A2FPN':
+            del clone.base_model, clone.base_layers
+
+        macs, _ = get_model_complexity_info(
+            clone, tuple(input_size[1:]), as_strings=False,
+            print_per_layer_stat=False, verbose=False
+        )
+        if macs is None:
+            raise RuntimeError('ptflops returned no result')
+        return macs / 1e9
+    except Exception as e:
+        print(f"⚠️  GMACs could not be measured ({type(e).__name__}: {e}). "
+              f"Install with: pip install ptflops==0.7.5")
+        return float('nan')
 
 
 def measure_inference_time(model, input_size=(1, 3, 256, 256), device='cuda', warmup=10, iterations=100):

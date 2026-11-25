@@ -1,0 +1,11 @@
+# Python packages for jetson_deploy/ on the Jetson. PyTorch is not needed there:
+# export the ONNX files on the training machine (export.py).
+numpy
+opencv-python-headless
+#
+# onnxruntime-gpu: install a build made for your JetPack version (see NVIDIA's Jetson
+# package index / the ONNX Runtime Jetson documentation), then check that
+#   python3 -c "import onnxruntime as ort; print(ort.get_available_providers())"
+# lists TensorrtExecutionProvider.
+#
+# TensorRT and trtexec are part of JetPack: /usr/src/tensorrt/bin/trtexec

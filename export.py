@@ -28,7 +28,7 @@ class DeployableModel(nn.Module):
         return out
 
 
-def export_single_onnx(model_name, weights_path=None, output_path=None, input_size=128, num_classes=1, opset=17, seed=42):
+def export_single_onnx(model_name, weights_path=None, output_path=None, input_size=256, num_classes=1, opset=17, seed=42):
     """
     Exports a single architecture to ONNX format optimized for TensorRT / Edge compilation.
     """
@@ -52,7 +52,9 @@ def export_single_onnx(model_name, weights_path=None, output_path=None, input_si
     model = get_model(model_name, num_classes=num_classes, seed=seed, input_size=input_size)
 
     # 2. Load Checkpoint if provided
-    if weights_path and os.path.exists(weights_path):
+    if weights_path and not os.path.exists(weights_path):
+        raise FileNotFoundError(f"Checkpoint not found: {weights_path}")
+    if weights_path:
         checkpoint = torch.load(weights_path, map_location='cpu', weights_only=False)
         if isinstance(checkpoint, dict):
             if 'model_state_dict' in checkpoint:
@@ -70,15 +72,12 @@ def export_single_onnx(model_name, weights_path=None, output_path=None, input_si
             clean_k = k[7:] if k.startswith('module.') else k
             clean_state_dict[clean_k] = v
 
-        try:
-            model.load_state_dict(clean_state_dict, strict=True)
-            print(f"[OK] Checkpoint weights loaded successfully (strict match).")
-        except Exception as e:
-            print(f"[WARN] Strict loading failed: {e}. Attempting non-strict loading...")
-            model.load_state_dict(clean_state_dict, strict=False)
-            print(f"[OK] Checkpoint weights loaded with strict=False.")
+        # strict: a partial load would silently export a model with random layers
+        model.load_state_dict(clean_state_dict, strict=True)
+        print(f"[OK] Checkpoint weights loaded successfully (strict match).")
     else:
-        print(f"[INFO] Initializing model with seed {seed} for latency / FLOPs edge profiling.")
+        print(f"[WARN] No --weights: RANDOM weights (seed {seed}). Use this file for latency only, "
+              f"never for accuracy.")
 
     model.eval()
     deploy_model = DeployableModel(model)
@@ -112,6 +111,18 @@ def export_single_onnx(model_name, weights_path=None, output_path=None, input_si
         except Exception as check_err:
             print(f"[WARN] onnx.checker notice: {check_err}")
 
+        # 5. Check that ONNX Runtime reproduces the PyTorch output
+        try:
+            import onnxruntime as ort
+            sess = ort.InferenceSession(output_path, providers=['CPUExecutionProvider'])
+            probe = torch.rand(1, 3, input_size, input_size, generator=torch.Generator().manual_seed(0))
+            with torch.no_grad():
+                ref = deploy_model(probe).numpy()
+            out = sess.run(None, {sess.get_inputs()[0].name: probe.numpy()})[0]
+            print(f"[OK] PyTorch vs ONNX Runtime max difference: {abs(ref - out).max():.2e}")
+        except ImportError:
+            print("[INFO] onnxruntime not installed: numerical check skipped.")
+
         file_size_kb = os.path.getsize(output_path) / 1024.0
         print(f"ONNX File Size: {file_size_kb:.2f} KB ({file_size_kb / 1024.0:.2f} MB)")
         return output_path
@@ -121,7 +132,7 @@ def export_single_onnx(model_name, weights_path=None, output_path=None, input_si
         return None
 
 
-def export_all_models(models_dir='models', output_dir='outputs/onnx', input_size=128, opset=13):
+def export_all_models(models_dir='models', output_dir='outputs/onnx', input_size=256, opset=17):
     """
     Batch exports all baseline and proposed models to ONNX for edge benchmark comparison.
     """
@@ -160,9 +171,9 @@ def export_all_models(models_dir='models', output_dir='outputs/onnx', input_size
 
 def main():
     parser = argparse.ArgumentParser(description="Export Flood Segmentation Models to ONNX for Jetson Orin Nano Benchmark")
-    parser.add_argument('--model', type=str, default='mambafloodlite', help="Architecture name (e.g., mambafloodlite, ours)")
+    parser.add_argument('--model', type=str, default='ours', help="Architecture name (e.g., mambafloodlite, ours)")
     parser.add_argument('--weights', type=str, default=None, help="Path to checkpoint .pth file")
-    parser.add_argument('--size', type=int, default=128, help="Input resolution (default: 128 for real-time edge)")
+    parser.add_argument('--size', type=int, default=256, help="Input resolution (default: 256, the training size)")
     parser.add_argument('--num_classes', type=int, default=1, help="Output channels (default: 1 for binary flood mask)")
     parser.add_argument('--output', type=str, default=None, help="Target path for ONNX file")
     parser.add_argument('--opset', type=int, default=17, help="ONNX Opset version (17 recommended per paper)")
@@ -172,7 +183,7 @@ def main():
     if args.export_all:
         export_all_models(input_size=args.size, opset=args.opset)
     else:
-        export_single_onnx(
+        path = export_single_onnx(
             model_name=args.model,
             weights_path=args.weights,
             output_path=args.output,
@@ -180,6 +191,8 @@ def main():
             num_classes=args.num_classes,
             opset=args.opset
         )
+        if path is None:
+            sys.exit(1)
 
 
 if __name__ == '__main__':

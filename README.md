@@ -369,32 +369,20 @@ This framework ensures **strict reproducibility**:
 
 ## ⚡ Edge Deployment & NVIDIA Jetson Orin Nano Benchmarking
 
-The framework includes dedicated export and benchmarking suites for real-time edge hardware (NVIDIA Jetson Orin Nano):
+All edge scripts use the training setup: 256 x 256 input, RGB scaled to [0, 1] (no ImageNet
+normalisation), logits followed by a sigmoid and a 0.5 threshold.
 
-### 1. Model Export (ONNX)
 ```bash
-# Export DWSeg_Lite (ours)
-python export.py --model ours --size 128 --output outputs/onnx/ours_128x128.onnx
+# On the training machine: export the trained checkpoint of each dataset
+python export.py --model ours \
+    --weights outputs/ours/seed_42/ours_hard_afm_floodkaggle_s42.pth \
+    --output outputs/onnx/ours_floodkaggle_s42_256x256.onnx
 
-# Export MambaFloodLite (Mamba SSM architecture)
-python export.py --model mambafloodlite --size 128 --output outputs/onnx/mambafloodlite_128x128.onnx
-
-# Batch export all core models
-python export.py --export_all --size 128
+# On the Jetson (copy outputs/onnx and the test sets first)
+bash jetson_deploy/run_official_benchmark.sh
 ```
 
-### 2. Hardware Benchmark on Jetson Orin Nano
-See [jetson_deploy/README_JETSON.md](file:///jetson_deploy/README_JETSON.md) for full instructions:
-```bash
-# 1. Lock hardware clocks for deterministic latency (MAXN mode)
-sudo nvpmodel -m 0 && sudo jetson_clocks
-
-# 2. Run isolated GPU kernel benchmark (trtexec)
-python3 jetson_deploy/benchmark_trtexec.py --onnx_dir outputs/onnx --precision fp16
-
-# 3. Run full accuracy and edge latency evaluation
-python3 jetson_deploy/evaluate_jetson.py --model_path outputs/onnx/ours_128x128.onnx
-```
+See [jetson_deploy/README_JETSON.md](jetson_deploy/README_JETSON.md) for the protocol and libraries.
 
 ---
 

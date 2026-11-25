@@ -12,7 +12,7 @@ timm
 einops
 fastprogress
 pytorch-lightning
-fvcore
+ptflops==0.7.5
 tensorflow
 timm
 onnx

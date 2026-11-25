@@ -1,115 +1,65 @@
-# NVIDIA Jetson Orin Nano Edge Deployment & Benchmark Suite
+# Jetson deployment and benchmark
 
-Official edge inference and hardware benchmark protocol for lightweight real-time flood area segmentation models (**DWSeg_Lite / ours** and **MambaFloodLite**), formatted for **A* / Q1 Conference & Journal Papers** (IEEE TGRS, ISPRS P&RS, CVPR, ECCV, ICCV, IEEE T-CSVT).
+Measurements use the training setup, so they can be compared with the training-machine results:
 
----
+| Item | Setting |
+|---|---|
+| Input | 1 x 3 x 256 x 256 |
+| Preprocessing | RGB, bilinear resize, divide by 255 (no ImageNet normalisation) |
+| Output | logits, sigmoid, threshold 0.5 |
+| Masks | `floodscene`: value 255 is flood; `floodkaggle`: value > 127 |
+| Accuracy | flood-class IoU and Dice pooled over all test pixels (as `utils/metrics.py`) |
+| Precision | FP16 or FP32 (state which one in any report) |
 
-## 1. Directory Structure
+## 1. Export on the training machine
 
-```text
-Flood_Area_Segmentation/
-├── export.py                        # Universal ONNX exporter with DeployableModel wrapper
-├── models/
-│   ├── mambafloodlite.py            # MambaFloodLite architecture (285K params, pure PyTorch fallback)
-│   ├── ours.py                      # DWSeg_Lite proposed architecture
-│   └── ...
-├── outputs/
-│   └── onnx/                        # Exported ONNX models ready for TensorRT compilation
-│       ├── ours_128x128.onnx
-│       └── mambafloodlite_128x128.onnx
-└── jetson_deploy/
-    ├── benchmark_trtexec.py         # Official trtexec isolated GPU kernel latency suite
-    ├── evaluate_jetson.py           # End-to-end evaluation (mIoU, Dice, Boundary-IoU, Latency, FPS)
-    ├── run_official_benchmark.sh    # Hardware clock locking and benchmark automation script
-    └── README_JETSON.md             # This deployment protocol documentation
-```
-
----
-
-## 2. Hardware Environment Locking (A* / Q1 Standard)
-
-To prevent frequency scaling jitter and thermal throttling during latency measurement, lock the Jetson Orin Nano clocks to maximum deterministic frequencies before profiling:
+Export one file per dataset and seed, from the trained checkpoints:
 
 ```bash
-# 1. Select MAXN (15W Max Performance) power mode
-sudo nvpmodel -m 0
+python export.py --model ours \
+    --weights outputs/ours/seed_42/ours_hard_afm_floodkaggle_s42.pth \
+    --output outputs/onnx/ours_floodkaggle_s42_256x256.onnx
+```
 
-# 2. Lock GPU, CPU, and EMC memory bus clocks to max frequency
+Always pass `--weights`. Without it the file has random weights and is only good for latency.
+The exporter checks that ONNX Runtime reproduces the PyTorch output.
+
+For a latency comparison, export the baselines the same way (for example `enet`, `fast-scnn`,
+`fasegnet`, `edanet`) and keep the `_256x256.onnx` suffix. ENet uses max-unpooling; check
+that `trtexec` accepts it.
+
+## 2. Libraries on the Jetson
+
+See `requirements-jetson.txt`. Copy `outputs/onnx/`, `floodkaggle/test/` and `floodscene/test/`
+to the board.
+
+## 3. Run
+
+```bash
+bash jetson_deploy/run_official_benchmark.sh                  # FP16
+PRECISION=fp32 bash jetson_deploy/run_official_benchmark.sh   # FP32
+```
+
+Or step by step:
+
+```bash
 sudo jetson_clocks
+python3 jetson_deploy/benchmark_trtexec.py --onnx_dir outputs/onnx --precision fp16
 
-# 3. Verify hardware clock status
-sudo jetson_clocks --show
-```
-
----
-
-## 3. ONNX Model Export
-
-Export models from the repository root:
-
-```bash
-# Export proposed architecture (DWSeg_Lite)
-python export.py --model ours --size 128 --output outputs/onnx/ours_128x128.onnx
-
-# Export MambaFloodLite architecture
-python export.py --model mambafloodlite --size 128 --output outputs/onnx/mambafloodlite_128x128.onnx
-
-# Batch export all core architectures in models/
-python export.py --export_all --size 128
-```
-
----
-
-## 4. Benchmark Execution on NVIDIA Jetson
-
-### Method A: Pure GPU Kernel Benchmark via `trtexec` (Isolated Compute Time)
-
-`trtexec` is the gold standard used by NVIDIA to benchmark hardware latency without host CPU overhead:
-
-```bash
-# Run isolated GPU kernel benchmark (FP16, 500 warmups, 1000 iterations)
-python3 jetson_deploy/benchmark_trtexec.py \
-    --onnx_dir outputs/onnx \
-    --precision fp16 \
-    --warm_up 500 \
-    --iterations 1000 \
-    --out_json jetson_trtexec_hardware_results.json
-```
-
-**Metrics extracted:**
-- `gpu_compute_mean_ms`: Mean GPU execution time (ms)
-- `gpu_compute_median_ms`: Median execution time (P50) (ms)
-- `gpu_compute_p90_ms`, `gpu_compute_p95_ms`, `gpu_compute_p99_ms`: Tail latency percentiles
-- `fps_throughput`: Throughput in frames per second (FPS)
-
-### Method B: End-to-End Accuracy & Edge Latency Evaluation
-
-Evaluates both segmentation accuracy and edge inference speed on test images:
-
-```bash
 python3 jetson_deploy/evaluate_jetson.py \
-    --model_path outputs/onnx/ours_128x128.onnx \
-    --images_dir path/to/test/images \
-    --masks_dir path/to/test/masks \
-    --device cuda \
-    --out_json jetson_evaluation_results.json
+    --model_path outputs/onnx/ours_floodkaggle_s*_256x256.onnx \
+    --images_dir floodkaggle/test/images --masks_dir floodkaggle/test/masks \
+    --dataset_type floodkaggle --precision fp16
 ```
 
-**Metrics reported:**
-- **Accuracy**: mIoU, Flood-IoU, Background-IoU, Dice/F1, Boundary-IoU (3-pixel morphological band, CVPR 2021), Precision, Recall, Specificity, Pixel Accuracy, FWIoU.
-- **Latency & Throughput**: Mean latency (ms) $\pm$ Std, P50, P95, P99, FPS.
+With several `--model_path` files (the five seeds) the script also prints mean and standard
+deviation of IoU and Dice.
 
-### Method C: One-Click Automated Run
+## 4. What each number means
 
-```bash
-bash jetson_deploy/run_official_benchmark.sh
-```
+- `trtexec` (`benchmark_trtexec.py`): GPU compute time only, without pre- or post-processing.
+- `inference_ms` (`evaluate_jetson.py`): one ONNX Runtime call per image.
+- `end_to_end_ms`: preprocessing + inference + threshold. Reading the image from disk is excluded.
 
----
-
-## 5. Summary of Architecture Specifications
-
-| Model | Parameters | Target Resolution | TensorRT Precision | Pure PyTorch Fallback |
-| :--- | :---: | :---: | :---: | :---: |
-| **DWSeg_Lite (`ours`)** | ~100K | 128×128 | FP16 / INT8 | Yes |
-| **MambaFloodLite** | 285,465 | 128×128 | FP16 / CUDA kernel | Yes |
+Report with every latency: board and memory size, JetPack / TensorRT version, power mode
+(`nvpmodel -q`), precision and input size. The result files record these as the board reports them.
