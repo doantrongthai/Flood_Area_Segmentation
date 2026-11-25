@@ -367,6 +367,37 @@ This framework ensures **strict reproducibility**:
 
 ---
 
+## ⚡ Edge Deployment & NVIDIA Jetson Orin Nano Benchmarking
+
+The framework includes dedicated export and benchmarking suites for real-time edge hardware (NVIDIA Jetson Orin Nano):
+
+### 1. Model Export (ONNX)
+```bash
+# Export DWSeg_Lite (ours)
+python export.py --model ours --size 128 --output outputs/onnx/ours_128x128.onnx
+
+# Export MambaFloodLite (Mamba SSM architecture)
+python export.py --model mambafloodlite --size 128 --output outputs/onnx/mambafloodlite_128x128.onnx
+
+# Batch export all core models
+python export.py --export_all --size 128
+```
+
+### 2. Hardware Benchmark on Jetson Orin Nano
+See [jetson_deploy/README_JETSON.md](file:///jetson_deploy/README_JETSON.md) for full instructions:
+```bash
+# 1. Lock hardware clocks for deterministic latency (MAXN mode)
+sudo nvpmodel -m 0 && sudo jetson_clocks
+
+# 2. Run isolated GPU kernel benchmark (trtexec)
+python3 jetson_deploy/benchmark_trtexec.py --onnx_dir outputs/onnx --precision fp16
+
+# 3. Run full accuracy and edge latency evaluation
+python3 jetson_deploy/evaluate_jetson.py --model_path outputs/onnx/ours_128x128.onnx
+```
+
+---
+
 ## 📚 Citation
 
 If you use this framework, please cite:
