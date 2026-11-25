@@ -16,3 +16,4 @@ fvcore
 tensorflow
 timm
 onnx
+onnxscript

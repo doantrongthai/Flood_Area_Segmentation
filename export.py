@@ -28,7 +28,7 @@ class DeployableModel(nn.Module):
         return out
 
 
-def export_single_onnx(model_name, weights_path=None, output_path=None, input_size=128, num_classes=1, opset=13, seed=42):
+def export_single_onnx(model_name, weights_path=None, output_path=None, input_size=128, num_classes=1, opset=17, seed=42):
     """
     Exports a single architecture to ONNX format optimized for TensorRT / Edge compilation.
     """
@@ -94,10 +94,10 @@ def export_single_onnx(model_name, weights_path=None, output_path=None, input_si
             'input_names': ['input'],
             'output_names': ['output']
         }
-        # Avoid Dynamo unrolling hang on recursive/loop SSM architectures
+        # 3. Export to ONNX (Try fast legacy trace, fallback to Dynamo for non-factor adaptive pools)
         try:
             torch.onnx.export(deploy_model, dummy_input, output_path, dynamo=False, **export_kwargs)
-        except TypeError:
+        except Exception:
             torch.onnx.export(deploy_model, dummy_input, output_path, **export_kwargs)
         print(f"[OK] ONNX export succeeded: {output_path}")
 
@@ -165,7 +165,7 @@ def main():
     parser.add_argument('--size', type=int, default=128, help="Input resolution (default: 128 for real-time edge)")
     parser.add_argument('--num_classes', type=int, default=1, help="Output channels (default: 1 for binary flood mask)")
     parser.add_argument('--output', type=str, default=None, help="Target path for ONNX file")
-    parser.add_argument('--opset', type=int, default=13, help="ONNX Opset version (13 or 17 recommended for TensorRT)")
+    parser.add_argument('--opset', type=int, default=17, help="ONNX Opset version (17 recommended per paper)")
     parser.add_argument('--export_all', action='store_true', help="Batch export all core models in models/")
     args = parser.parse_args()
 
